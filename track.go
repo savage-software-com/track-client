@@ -1,0 +1,455 @@
+// Package track counts the page views of a website for Track
+// (https://track.savage-software.nl), without cookies and without anything
+// in the visitor's browser. Wrap the site's handler with the middleware:
+//
+//	tracker, err := track.New(track.Config{Token: os.Getenv("TRACK_TOKEN")})
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	defer tracker.Close(context.Background())
+//
+//	http.ListenAndServe(":8080", tracker.Middleware(site))
+//
+// The middleware notes a page view after the page was sent, in memory, and a
+// goroutine sends the views to Track in batches, every ten seconds: a page
+// never waits for Track, and when Track cannot be reached the views wait in
+// memory, up to Config.QueueSize, and are tried again.
+//
+// Counted are pages a person opens: GET requests answered with 200 and
+// text/html, without a file extension in the path. Not counted are files,
+// prefetches, htmx fragments (boosted links do count), bots, link previews,
+// monitors and scripts, recognised by their user agent, and pages that ask
+// not to be kept: "X-Robots-Tag: noindex", "Cache-Control: private" or
+// <meta name="robots" content="noindex">. Pages answered with 404 are counted
+// apart, so the dashboard lists the addresses visitors did not find.
+//
+// What leaves the site for each view: the host, the path, the page's
+// <title>, the referring site (its host only), the utm_source, utm_medium
+// and utm_campaign of the address (no other part of the query), the
+// visitor's first language, the user agent and the IP address. Track looks
+// up the country and city of the address and counts the visitor with a salt
+// that changes every day, and stores neither the address nor the user agent:
+// only totals per day.
+//
+// Without a token the tracker counts nothing, so a site runs the same in
+// development without Track.
+package track
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/netip"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// DefaultEndpoint is where events are sent unless Config.Endpoint says
+// otherwise.
+const DefaultEndpoint = "https://track.savage-software.nl/api/v1/collect"
+
+const (
+	defaultFlushInterval = 10 * time.Second
+	defaultBatchSize     = 250
+	defaultQueueSize     = 10_000
+	// maxBackoff bounds the wait between attempts while Track cannot be
+	// reached.
+	maxBackoff = 5 * time.Minute
+	// MaxBatch is the most events Track accepts in one request.
+	MaxBatch = 1000
+)
+
+// Config configures a Tracker. Only Token is required.
+type Config struct {
+	// Token is the site's token, from the site's settings at Track. Without
+	// one the tracker counts nothing.
+	Token string
+	// Endpoint is the address events are posted to; DefaultEndpoint when
+	// empty.
+	Endpoint string
+	// Hostname is the site's host name, such as "example.com", for a site
+	// behind a proxy that changes the Host header. Track counts only the
+	// events of the site's domain and its subdomains, so views of
+	// localhost or a test server never mix with the real ones.
+	Hostname string
+	// SiteName is removed from the page titles where the layout adds it,
+	// such as "About · Example" or "Example | About", so the dashboard lists
+	// the pages' own titles.
+	SiteName string
+	// TrustedProxies are the proxies, as addresses or CIDR ranges such as
+	// "10.0.0.0/8", whose X-Forwarded-For, X-Real-IP or Forwarded header
+	// names the visitor. Without them the visitor is the direct peer
+	// (r.RemoteAddr), which is right when middleware such as go-router's
+	// RealIP or chi's RealIP has already put the visitor's address there.
+	TrustedProxies []string
+	// ClientIP returns the visitor's address, for a site that knows it
+	// better, such as go-webthings' frontend.ClientIP. It replaces
+	// TrustedProxies.
+	ClientIP func(*http.Request) string
+	// Skip leaves requests it reports true for uncounted, such as those of
+	// the site's own editors.
+	Skip func(*http.Request) bool
+	// FlushInterval is how long events wait before they are sent; ten
+	// seconds when zero.
+	FlushInterval time.Duration
+	// BatchSize is the most events sent at once, at most MaxBatch; 250 when
+	// zero. A full batch is sent right away.
+	BatchSize int
+	// QueueSize is the most events kept while Track cannot be reached;
+	// newer ones are dropped beyond it. 10,000 when zero.
+	QueueSize int
+	// HTTPClient sends the events; a client with a 10 second timeout when
+	// nil.
+	HTTPClient *http.Client
+	// Logger reports events that could not be sent; slog.Default() when
+	// nil.
+	Logger *slog.Logger
+}
+
+// Kind is what an event counts.
+type Kind string
+
+const (
+	// Pageview is a page a visitor opened.
+	Pageview Kind = "pageview"
+	// NotFound is an address a visitor opened that answered 404.
+	NotFound Kind = "notfound"
+	// Custom is an event the site reports itself, such as a sign-up (see
+	// Tracker.Event).
+	Custom Kind = "event"
+)
+
+// Event is one counted request, as it is sent to Track. Track keeps none of
+// it as it is: it adds it to the totals of its day.
+type Event struct {
+	Kind Kind      `json:"kind"`
+	Time time.Time `json:"time"`
+	// Host is the site's host name, without port.
+	Host string `json:"host"`
+	// Path is the path of the address, without its query.
+	Path  string `json:"path"`
+	Title string `json:"title,omitempty"`
+	// Name is the name of a Custom event.
+	Name string `json:"name,omitempty"`
+	// Referrer is the host of the site the visitor came from, without
+	// "www.": empty for direct visits and for links within the site.
+	Referrer string `json:"referrer,omitempty"`
+	// Source, Medium and Campaign are the address's utm_source (or ref),
+	// utm_medium and utm_campaign.
+	Source   string `json:"source,omitempty"`
+	Medium   string `json:"medium,omitempty"`
+	Campaign string `json:"campaign,omitempty"`
+	// Language is the first language the browser asks for, such as "nl".
+	Language  string `json:"language,omitempty"`
+	UserAgent string `json:"user_agent"`
+	IP        string `json:"ip"`
+}
+
+// Batch is the body of a post to the endpoint.
+type Batch struct {
+	Events []Event `json:"events"`
+}
+
+// Tracker counts a site's page views and sends them to Track. It is safe
+// for concurrent use.
+type Tracker struct {
+	config   Config
+	proxies  []netip.Prefix
+	client   *http.Client
+	logger   *slog.Logger
+	disabled bool
+
+	mu      sync.Mutex
+	queue   []Event
+	backoff time.Duration
+	retryAt time.Time
+
+	wake    chan struct{}
+	stop    chan struct{}
+	done    chan struct{}
+	closed  atomic.Bool
+	sending sync.Mutex
+
+	sent    atomic.Uint64
+	dropped atomic.Uint64
+}
+
+// New returns a Tracker and starts its sender. Close it when the site stops,
+// so the events in memory are sent. A config without a token gives a
+// tracker that counts nothing.
+func New(config Config) (*Tracker, error) {
+	t := &Tracker{
+		config: config,
+		client: config.HTTPClient,
+		logger: config.Logger,
+		wake:   make(chan struct{}, 1),
+		stop:   make(chan struct{}),
+		done:   make(chan struct{}),
+	}
+
+	if t.logger == nil {
+		t.logger = slog.Default()
+	}
+
+	if strings.TrimSpace(config.Token) == "" {
+		t.disabled = true
+		t.logger.Info("track: no token, page views are not counted")
+		close(t.done)
+
+		return t, nil
+	}
+
+	if t.config.Endpoint == "" {
+		t.config.Endpoint = DefaultEndpoint
+	}
+
+	if t.config.FlushInterval <= 0 {
+		t.config.FlushInterval = defaultFlushInterval
+	}
+
+	if t.config.BatchSize <= 0 {
+		t.config.BatchSize = defaultBatchSize
+	}
+
+	t.config.BatchSize = min(t.config.BatchSize, MaxBatch)
+
+	if t.config.QueueSize <= 0 {
+		t.config.QueueSize = defaultQueueSize
+	}
+
+	if t.client == nil {
+		t.client = &http.Client{Timeout: 10 * time.Second}
+	}
+
+	for _, proxy := range config.TrustedProxies {
+		prefix, err := parsePrefix(proxy)
+		if err != nil {
+			return nil, fmt.Errorf("track: trusted proxy %q: %w", proxy, err)
+		}
+
+		t.proxies = append(t.proxies, prefix)
+	}
+
+	go t.run()
+
+	return t, nil
+}
+
+func parsePrefix(value string) (netip.Prefix, error) {
+	value = strings.TrimSpace(value)
+	if strings.Contains(value, "/") {
+		return netip.ParsePrefix(value)
+	}
+
+	addr, err := netip.ParseAddr(value)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+
+	return netip.PrefixFrom(addr.Unmap(), addr.Unmap().BitLen()), nil
+}
+
+// Enabled reports whether the tracker counts, which it does with a token.
+func (t *Tracker) Enabled() bool {
+	return !t.disabled
+}
+
+// Sent is the number of events Track accepted.
+func (t *Tracker) Sent() uint64 {
+	return t.sent.Load()
+}
+
+// Dropped is the number of events the tracker gave up on, because its queue
+// was full or Track refused them.
+func (t *Tracker) Dropped() uint64 {
+	return t.dropped.Load()
+}
+
+// add queues an event; a full queue drops it.
+func (t *Tracker) add(event Event) {
+	if t.disabled || t.closed.Load() {
+		return
+	}
+
+	t.mu.Lock()
+
+	if len(t.queue) >= t.config.QueueSize {
+		t.mu.Unlock()
+		t.dropped.Add(1)
+
+		return
+	}
+
+	t.queue = append(t.queue, event)
+	full := len(t.queue) >= t.config.BatchSize
+	t.mu.Unlock()
+
+	if full {
+		select {
+		case t.wake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// run sends the queue every FlushInterval, and at once when a batch is full,
+// until Close.
+func (t *Tracker) run() {
+	defer close(t.done)
+
+	ticker := time.NewTicker(t.config.FlushInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-t.stop:
+			return
+		case <-ticker.C:
+		case <-t.wake:
+		}
+
+		t.mu.Lock()
+		waiting := time.Now().Before(t.retryAt)
+		t.mu.Unlock()
+
+		if waiting {
+			continue
+		}
+
+		if err := t.Flush(context.Background()); err != nil {
+			t.logger.Warn("track: events not sent, trying again later", "error", err)
+		}
+	}
+}
+
+// Flush sends the queued events now, in batches. Events Track could not
+// take because it was unreachable or busy go back to the queue; events it
+// refused are dropped.
+func (t *Tracker) Flush(ctx context.Context) error {
+	if t.disabled {
+		return nil
+	}
+
+	t.sending.Lock()
+	defer t.sending.Unlock()
+
+	for {
+		t.mu.Lock()
+		n := min(len(t.queue), t.config.BatchSize)
+		batch := append([]Event(nil), t.queue[:n]...)
+		t.queue = t.queue[n:]
+		t.mu.Unlock()
+
+		if len(batch) == 0 {
+			return nil
+		}
+
+		err := t.send(ctx, batch)
+
+		var refused refusedError
+
+		switch {
+		case err == nil:
+			t.sent.Add(uint64(len(batch)))
+			t.mu.Lock()
+			t.backoff = 0
+			t.retryAt = time.Time{}
+			t.mu.Unlock()
+		case errors.As(err, &refused):
+			t.dropped.Add(uint64(len(batch)))
+			t.logger.Error("track: events refused", "status", refused.status, "message", refused.message)
+		default:
+			t.requeue(batch)
+
+			return err
+		}
+	}
+}
+
+// requeue puts a batch that could not be sent back in front of the queue,
+// as far as there is room, and waits longer before the next attempt.
+func (t *Tracker) requeue(batch []Event) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	room := t.config.QueueSize - len(t.queue)
+	if room < len(batch) {
+		t.dropped.Add(uint64(len(batch) - max(room, 0)))
+		batch = batch[:max(room, 0)]
+	}
+
+	t.queue = append(batch, t.queue...)
+
+	t.backoff = min(max(t.backoff*2, t.config.FlushInterval), maxBackoff)
+	t.retryAt = time.Now().Add(t.backoff)
+}
+
+// refusedError is an answer that sending again will not change, such as a
+// wrong token.
+type refusedError struct {
+	status  int
+	message string
+}
+
+func (e refusedError) Error() string {
+	return fmt.Sprintf("track refused the events: %d %s", e.status, e.message)
+}
+
+func (t *Tracker) send(ctx context.Context, batch []Event) error {
+	body, err := json.Marshal(Batch{Events: batch})
+	if err != nil {
+		return refusedError{message: err.Error()}
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.config.Endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+t.config.Token)
+	req.Header.Set("User-Agent", "track-go/1")
+
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return err
+	}
+
+	defer resp.Body.Close()
+
+	message, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+
+	switch {
+	case resp.StatusCode < 300:
+		return nil
+	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
+		return fmt.Errorf("track answered %d", resp.StatusCode)
+	default:
+		return refusedError{status: resp.StatusCode, message: strings.TrimSpace(string(message))}
+	}
+}
+
+// Close stops the sender and sends what is left, within ctx. Events
+// counted after Close are dropped.
+func (t *Tracker) Close(ctx context.Context) error {
+	if t.disabled || !t.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+
+	close(t.stop)
+
+	select {
+	case <-t.done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	return t.Flush(ctx)
+}
