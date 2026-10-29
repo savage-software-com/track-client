@@ -66,12 +66,13 @@ tracker.Event(r, "newsletter sign-up")
 ## What is sent
 
 For each view: the host, the path without the query, the page's `<title>`,
-the host of the referring site, `utm_source` (or `ref`), `utm_medium` and
-`utm_campaign`, the browser's first language, the user agent and the IP
-address. Track looks up the country and city of the address and recognises
-the visitor for that day with a salted hash; the salt differs per site and
-per day and lives in memory only. Track stores neither the address nor the
-user agent: only totals per day, each dimension on its own.
+how long your server took to make and send it, the host of the referring
+site, `utm_source` (or `ref`), `utm_medium` and `utm_campaign`, the
+browser's first language, the user agent and the IP address. Track looks up
+the country and city of the address and recognises the visitor for that day
+with a salted hash; the salt differs per site and per day and lives in
+memory only. Track stores neither the address nor the user agent: only
+totals per day, each dimension on its own.
 
 ## Configuration
 

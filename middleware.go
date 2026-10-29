@@ -43,7 +43,9 @@ func (t *Tracker) Middleware(next http.Handler) http.Handler {
 		}
 
 		recorder := &recorder{ResponseWriter: w}
+		start := time.Now()
 		next.ServeHTTP(recorder, r)
+		elapsed := time.Since(start)
 
 		status := recorder.status
 		if status == 0 {
@@ -59,7 +61,9 @@ func (t *Tracker) Middleware(next http.Handler) http.Handler {
 		}
 
 		if status == http.StatusNotFound {
-			t.add(t.event(r, NotFound))
+			event := t.event(r, NotFound)
+			event.Duration = microseconds(elapsed)
+			t.add(event)
 
 			return
 		}
@@ -74,6 +78,7 @@ func (t *Tracker) Middleware(next http.Handler) http.Handler {
 
 		event := t.event(r, Pageview)
 		event.Title = withoutSiteName(title(head), t.config.SiteName)
+		event.Duration = microseconds(elapsed)
 		t.add(event)
 	})
 }
@@ -355,6 +360,12 @@ func language(accept string) string {
 	}
 
 	return primary
+}
+
+// microseconds is how long the site took for a page, at least 1, so a
+// measured time is never taken for none.
+func microseconds(d time.Duration) int64 {
+	return max(d.Microseconds(), 1)
 }
 
 // field is a campaign value as it is counted: one line, at most 100 bytes.

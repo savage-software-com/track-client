@@ -116,6 +116,11 @@ func TestMiddlewareCountsPages(t *testing.T) {
 	}
 
 	got := events[0]
+	if got.Duration <= 0 {
+		t.Errorf("duration = %d µs, want the time the page took", got.Duration)
+	}
+
+	got.Duration = 0
 	want := Event{
 		Kind: Pageview, Host: "example.com", Path: "/about", Title: "About & us", Referrer: "google.com",
 		Source: "news", Campaign: "Autumn sale", Language: "nl", UserAgent: browser, IP: "192.0.2.1",

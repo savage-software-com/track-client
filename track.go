@@ -24,12 +24,12 @@
 // apart, so the dashboard lists the addresses visitors did not find.
 //
 // What leaves the site for each view: the host, the path, the page's
-// <title>, the referring site (its host only), the utm_source, utm_medium
-// and utm_campaign of the address (no other part of the query), the
-// visitor's first language, the user agent and the IP address. Track looks
-// up the country and city of the address and counts the visitor with a salt
-// that changes every day, and stores neither the address nor the user agent:
-// only totals per day.
+// <title>, how long the server took for it, the referring site (its host
+// only), the utm_source, utm_medium and utm_campaign of the address (no
+// other part of the query), the visitor's first language, the user agent and
+// the IP address. Track looks up the country and city of the address and
+// counts the visitor with a salt that changes every day, and stores neither
+// the address nor the user agent: only totals per day.
 //
 // Without a token the tracker counts nothing, so a site runs the same in
 // development without Track.
@@ -150,6 +150,10 @@ type Event struct {
 	Language  string `json:"language,omitempty"`
 	UserAgent string `json:"user_agent"`
 	IP        string `json:"ip"`
+	// Duration is how long the site took to make and send the page, in
+	// microseconds: from the request reaching the middleware until the
+	// handler returned. Zero when it was not measured.
+	Duration int64 `json:"duration_us,omitempty"`
 }
 
 // Batch is the body of a post to the endpoint.
