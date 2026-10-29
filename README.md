@@ -5,8 +5,7 @@ statistics for your website without cookies, without a script in the page
 and without storing IP addresses.
 
 The middleware counts the pages visitors open on your server and sends them
-to Track in batches, every ten seconds. A page never waits for Track; when
-Track cannot be reached, the views wait in memory and are sent later.
+to Track in batches, every ten seconds.
 
 ```sh
 go get github.com/savage-software-com/track-client
@@ -28,6 +27,22 @@ Get the token by registering your domain at
 <https://track.savage-software.nl>. Without a token the tracker counts
 nothing, so development runs without Track. The package has no dependencies
 besides the standard library.
+
+## It never slows your site down
+
+- In the request, the middleware only copies a few strings and the start of
+  the page, and hands them to a goroutine without waiting: about 3 µs per
+  page. When that goroutine is behind, the view is dropped, never held.
+- Reading the title and sending happen in goroutines of their own, with a
+  context and a timeout of their own (15 seconds per post). A slow or
+  unreachable Track never reaches a request; the views wait in memory, up
+  to `QueueSize`, and are tried again later.
+- A panic in the tracker, or in your own `Skip` or `ClientIP`, is recovered
+  and logged: the view is lost, the page is not.
+- WebSockets and server-sent events are passed through untouched, and a
+  handler can still hijack the connection or flush a stream.
+- `Close` gives up after five seconds when its context has no deadline, so
+  a site that stops while Track is down stops on time.
 
 ## go-webthings
 
@@ -94,3 +109,11 @@ Events are posted to the endpoint as `{"events": [...]}` (`track.Batch`),
 at most 1000 per request, with `Authorization: Bearer <token>`. Track answers
 `202` with the number of events it accepted and rejected; `401` for an
 unknown token.
+
+## License
+
+The client is source-available, not open source: you may use it, unmodified,
+only to send statistics to Track, under an account there. See
+[LICENSE](LICENSE). Because the license is not an open source license,
+pkg.go.dev does not show the documentation; this README and the comments in
+the code do.

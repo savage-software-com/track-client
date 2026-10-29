@@ -1,0 +1,62 @@
+Track Client License
+
+Copyright (c) 2026 Savage Software. All rights reserved.
+
+This software, its source code and its documentation (together "the
+Software") are the property of Savage Software. The Software is published
+for one purpose only: to let websites send statistics to Track, the service
+of Savage Software at https://track.savage-software.nl ("the Service"). It
+is not open source software. No right is granted except as written below.
+
+1. Permission
+
+   As long as you have an account at the Service and keep to these terms,
+   you may:
+
+   a. download the Software, also through a Go module proxy, and keep a
+      copy of it in a vendor folder or module cache;
+   b. build the Software, unmodified, into the software of websites that
+      you run, or that you run for others; and
+   c. run that software, so that it sends data to the Service.
+
+2. Restrictions
+
+   You may not, in whole or in part, directly or indirectly:
+
+   a. use the Software for any purpose other than sending data to the
+      Service, or let it send data to anyone else;
+   b. modify, adapt, translate or create derivative works of the Software,
+      except where the law allows it regardless of this restriction;
+   c. copy, publish, distribute, sublicense, sell, rent, lend or otherwise
+      make the Software available to others, except as part of the
+      software of a website as in section 1;
+   d. remove, hide or change this license, or any notice of copyright or
+      ownership;
+   e. use the Software, its design or its source code to build, train or
+      improve a product or service that competes with the Service.
+
+3. Ending
+
+   This permission ends at once, without notice, when you break these
+   terms, or when your account at the Service ends. You must then stop
+   using the Software, and delete your copies of it within thirty days.
+
+4. No warranty
+
+   The Software is provided "as is", without warranty of any kind, express
+   or implied, including but not limited to the warranties of
+   merchantability, fitness for a particular purpose and non-infringement.
+
+5. Liability
+
+   As far as the law allows, Savage Software is not liable for any damage,
+   direct or indirect, that arises from using the Software or from being
+   unable to use it.
+
+6. Law
+
+   These terms are governed by the law of the Netherlands. Disputes are
+   brought before the competent court in the Netherlands.
+
+Savage Software may change these terms for later versions of the Software.
+Each version is licensed under the terms it was published with.

@@ -10,10 +10,14 @@
 //
 //	http.ListenAndServe(":8080", tracker.Middleware(site))
 //
-// The middleware notes a page view after the page was sent, in memory, and a
-// goroutine sends the views to Track in batches, every ten seconds: a page
-// never waits for Track, and when Track cannot be reached the views wait in
-// memory, up to Config.QueueSize, and are tried again.
+// The tracker never makes a page wait or fail. In the request the
+// middleware only copies a few strings and the start of the page, and hands
+// them to a goroutine without waiting: when that goroutine is behind, the
+// view is dropped rather than held. The goroutine reads the title, and a
+// second one sends the views to Track in batches, every ten seconds, with
+// a context and a timeout of its own. When Track cannot be reached, the
+// views wait in memory, up to Config.QueueSize, and are tried again. A
+// panic in the tracker is recovered and logged; the page is not counted.
 //
 // Counted are pages a person opens: GET requests answered with 200 and
 // text/html, without a file extension in the path. Not counted are files,
@@ -59,12 +63,22 @@ const (
 	defaultFlushInterval = 10 * time.Second
 	defaultBatchSize     = 250
 	defaultQueueSize     = 10_000
+	// sampleBuffer is how many requests may wait for the worker that makes
+	// events of them; beyond it, views are dropped.
+	sampleBuffer = 4096
+	// sendTimeout bounds one post to Track, also with an HTTPClient
+	// without a timeout of its own.
+	sendTimeout = 15 * time.Second
 	// maxBackoff bounds the wait between attempts while Track cannot be
 	// reached.
 	maxBackoff = 5 * time.Minute
 	// MaxBatch is the most events Track accepts in one request.
 	MaxBatch = 1000
 )
+
+// closeTimeout bounds Close when its context has no deadline, so a site
+// that stops while Track cannot be reached does not hang.
+var closeTimeout = 5 * time.Second
 
 // Config configures a Tracker. Only Token is required.
 type Config struct {
@@ -175,9 +189,16 @@ type Tracker struct {
 	backoff time.Duration
 	retryAt time.Time
 
+	// samples are the requests the worker makes events of; pending counts
+	// those it has not finished.
+	samples chan sample
+	pending atomic.Int64
+	heads   sync.Pool
+
 	wake    chan struct{}
 	stop    chan struct{}
 	done    chan struct{}
+	worked  chan struct{}
 	closed  atomic.Bool
 	sending sync.Mutex
 
@@ -185,17 +206,38 @@ type Tracker struct {
 	dropped atomic.Uint64
 }
 
-// New returns a Tracker and starts its sender. Close it when the site stops,
-// so the events in memory are sent. A config without a token gives a
+// New returns a Tracker and starts its goroutines. Close it when the site
+// stops, so the events in memory are sent. A config without a token gives a
 // tracker that counts nothing.
 func New(config Config) (*Tracker, error) {
+	t, err := newTracker(config)
+	if err != nil || t.disabled {
+		return t, err
+	}
+
+	go t.work()
+	go t.run()
+
+	return t, nil
+}
+
+// newTracker returns a Tracker without starting its goroutines.
+func newTracker(config Config) (*Tracker, error) {
 	t := &Tracker{
-		config: config,
-		client: config.HTTPClient,
-		logger: config.Logger,
-		wake:   make(chan struct{}, 1),
-		stop:   make(chan struct{}),
-		done:   make(chan struct{}),
+		config:  config,
+		client:  config.HTTPClient,
+		logger:  config.Logger,
+		samples: make(chan sample, sampleBuffer),
+		wake:    make(chan struct{}, 1),
+		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
+		worked:  make(chan struct{}),
+	}
+
+	t.heads.New = func() any {
+		head := make([]byte, 0, maxHead)
+
+		return &head
 	}
 
 	if t.logger == nil {
@@ -205,7 +247,6 @@ func New(config Config) (*Tracker, error) {
 	if strings.TrimSpace(config.Token) == "" {
 		t.disabled = true
 		t.logger.Info("track: no token, page views are not counted")
-		close(t.done)
 
 		return t, nil
 	}
@@ -241,8 +282,6 @@ func New(config Config) (*Tracker, error) {
 		t.proxies = append(t.proxies, prefix)
 	}
 
-	go t.run()
-
 	return t, nil
 }
 
@@ -276,12 +315,9 @@ func (t *Tracker) Dropped() uint64 {
 	return t.dropped.Load()
 }
 
-// add queues an event; a full queue drops it.
+// add queues an event for the sender; a full queue drops it. Only the
+// worker adds events, so a request never waits for the queue's lock.
 func (t *Tracker) add(event Event) {
-	if t.disabled || t.closed.Load() {
-		return
-	}
-
 	t.mu.Lock()
 
 	if len(t.queue) >= t.config.QueueSize {
@@ -327,20 +363,49 @@ func (t *Tracker) run() {
 			continue
 		}
 
-		if err := t.Flush(context.Background()); err != nil {
+		if err := t.flush(context.Background()); err != nil {
 			t.logger.Warn("track: events not sent, trying again later", "error", err)
 		}
 	}
 }
 
-// Flush sends the queued events now, in batches. Events Track could not
-// take because it was unreachable or busy go back to the queue; events it
-// refused are dropped.
+// Flush sends the views counted so far now, in batches, once the worker has
+// made events of them. Events Track could not take because it was
+// unreachable or busy go back to the queue; events it refused are dropped.
 func (t *Tracker) Flush(ctx context.Context) error {
 	if t.disabled {
 		return nil
 	}
 
+	t.drain(ctx)
+
+	return t.flush(ctx)
+}
+
+// drain makes events of the samples that wait, and waits for the one the
+// worker is busy with, for at most a second.
+func (t *Tracker) drain(ctx context.Context) {
+	deadline := time.Now().Add(time.Second)
+
+	for {
+		select {
+		case s := <-t.samples:
+			t.process(s)
+
+			continue
+		default:
+		}
+
+		if t.pending.Load() <= 0 || time.Now().After(deadline) || ctx.Err() != nil {
+			return
+		}
+
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// flush sends the queued events in batches.
+func (t *Tracker) flush(ctx context.Context) error {
 	t.sending.Lock()
 	defer t.sending.Unlock()
 
@@ -412,6 +477,9 @@ func (t *Tracker) send(ctx context.Context, batch []Event) error {
 		return refusedError{message: err.Error()}
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, sendTimeout)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.config.Endpoint, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -440,20 +508,30 @@ func (t *Tracker) send(ctx context.Context, batch []Event) error {
 	}
 }
 
-// Close stops the sender and sends what is left, within ctx. Events
-// counted after Close are dropped.
+// Close stops the tracker and sends what is left, within ctx, or within
+// five seconds when ctx has no deadline: a site that stops while Track
+// cannot be reached does not hang. Views counted after Close are dropped.
 func (t *Tracker) Close(ctx context.Context) error {
 	if t.disabled || !t.closed.CompareAndSwap(false, true) {
 		return nil
 	}
 
-	close(t.stop)
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
 
-	select {
-	case <-t.done:
-	case <-ctx.Done():
-		return ctx.Err()
+		ctx, cancel = context.WithTimeout(ctx, closeTimeout)
+		defer cancel()
 	}
 
-	return t.Flush(ctx)
+	close(t.stop)
+
+	for _, done := range []chan struct{}{t.worked, t.done} {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return t.flush(ctx)
 }

@@ -51,7 +51,7 @@ func (c *collector) received() []Event {
 	return append([]Event(nil), c.events...)
 }
 
-func newTracker(t *testing.T, endpoint string, configure ...func(*Config)) *Tracker {
+func startTracker(t *testing.T, endpoint string, configure ...func(*Config)) *Tracker {
 	t.Helper()
 
 	config := Config{Token: "trk_test", Endpoint: endpoint, FlushInterval: time.Hour}
@@ -98,7 +98,7 @@ func TestMiddlewareCountsPages(t *testing.T) {
 	server := httptest.NewServer(fake)
 	defer server.Close()
 
-	tracker := newTracker(t, server.URL, func(c *Config) { c.SiteName = "Example" })
+	tracker := startTracker(t, server.URL, func(c *Config) { c.SiteName = "Example" })
 	site := tracker.Middleware(page(200, "<html><head><title>About &amp; us · Example</title></head><body>hi</body></html>"))
 
 	visit(site, http.MethodGet, "http://example.com/about?utm_source=news&utm_campaign=Autumn+sale&email=a@b.c",
@@ -141,7 +141,7 @@ func TestMiddlewareSkips(t *testing.T) {
 	server := httptest.NewServer(fake)
 	defer server.Close()
 
-	tracker := newTracker(t, server.URL, func(c *Config) {
+	tracker := startTracker(t, server.URL, func(c *Config) {
 		c.Skip = func(r *http.Request) bool { return r.URL.Query().Has("editor") }
 	})
 
@@ -177,7 +177,7 @@ func TestMiddlewareCountsNotFound(t *testing.T) {
 	server := httptest.NewServer(fake)
 	defer server.Close()
 
-	tracker := newTracker(t, server.URL)
+	tracker := startTracker(t, server.URL)
 	visit(tracker.Middleware(page(404, "<title>Not found</title>")), http.MethodGet, "/old-page")
 
 	if err := tracker.Flush(context.Background()); err != nil {
@@ -195,7 +195,7 @@ func TestCustomEvent(t *testing.T) {
 	server := httptest.NewServer(fake)
 	defer server.Close()
 
-	tracker := newTracker(t, server.URL)
+	tracker := startTracker(t, server.URL)
 
 	req := httptest.NewRequest(http.MethodPost, "/signup", nil)
 	req.Header.Set("User-Agent", browser)
@@ -216,7 +216,7 @@ func TestRetriesWhenTrackIsDown(t *testing.T) {
 	server := httptest.NewServer(fake)
 	defer server.Close()
 
-	tracker := newTracker(t, server.URL)
+	tracker := startTracker(t, server.URL)
 	site := tracker.Middleware(page(200, "<title>Home</title>"))
 	visit(site, http.MethodGet, "/")
 
@@ -246,7 +246,7 @@ func TestRefusedEventsAreDropped(t *testing.T) {
 	server := httptest.NewServer(fake)
 	defer server.Close()
 
-	tracker := newTracker(t, server.URL)
+	tracker := startTracker(t, server.URL)
 	visit(tracker.Middleware(page(200, "<title>Home</title>")), http.MethodGet, "/")
 
 	if err := tracker.Flush(context.Background()); err != nil {
@@ -300,7 +300,7 @@ func TestWithoutTokenNothingIsCounted(t *testing.T) {
 }
 
 func TestClientIP(t *testing.T) {
-	tracker := newTracker(t, "http://127.0.0.1:1", func(c *Config) { c.TrustedProxies = []string{"10.0.0.0/8"} })
+	tracker := startTracker(t, "http://127.0.0.1:1", func(c *Config) { c.TrustedProxies = []string{"10.0.0.0/8"} })
 
 	tests := []struct {
 		name    string

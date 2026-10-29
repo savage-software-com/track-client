@@ -1,6 +1,7 @@
 package track
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"html"
@@ -28,97 +29,111 @@ const (
 	maxText = 300
 )
 
-// Middleware counts the pages of next that visitors open. The response is
-// never delayed: the view is noted after the page was written.
+// Middleware counts the pages of next that visitors open. In the request
+// it only copies what the view needs and hands it to the worker without
+// waiting (see sample); reading the page and sending happen elsewhere.
 func (t *Tracker) Middleware(next http.Handler) http.Handler {
 	if t.disabled {
 		return next
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !countable(r) || t.config.Skip != nil && t.config.Skip(r) {
+		if !countable(r) || t.skip(r) {
 			next.ServeHTTP(w, r)
 
 			return
 		}
 
-		recorder := &recorder{ResponseWriter: w}
+		recorder := &recorder{ResponseWriter: w, heads: &t.heads}
 		start := time.Now()
+
+		// A handler that panics keeps its panic; the start of the page goes
+		// back to the pool either way.
+		defer recorder.release()
+
 		next.ServeHTTP(recorder, r)
-		elapsed := time.Since(start)
-
-		status := recorder.status
-		if status == 0 {
-			status = http.StatusOK
-		}
-
-		if status != http.StatusOK && status != http.StatusNotFound {
-			return
-		}
-
-		if !strings.HasPrefix(w.Header().Get("Content-Type"), "text/html") {
-			return
-		}
-
-		if status == http.StatusNotFound {
-			event := t.event(r, NotFound)
-			event.Duration = microseconds(elapsed)
-			t.add(event)
-
-			return
-		}
-
-		// A site that compresses its pages itself, below this middleware,
-		// writes them compressed.
-		head := plainHead(w.Header(), recorder.head)
-
-		if private(w.Header()) || noindexMeta(head) {
-			return
-		}
-
-		event := t.event(r, Pageview)
-		event.Title = withoutSiteName(title(head), t.config.SiteName)
-		event.Duration = microseconds(elapsed)
-		t.add(event)
+		t.observe(recorder, r, time.Since(start))
 	})
+}
+
+// skip reports whether Config.Skip leaves r uncounted. A Skip that panics
+// leaves it uncounted too, rather than failing the page.
+func (t *Tracker) skip(r *http.Request) (skip bool) {
+	if t.config.Skip == nil {
+		return false
+	}
+
+	defer func() {
+		if v := recover(); v != nil {
+			t.logger.Error("track: Skip panicked; the page is not counted", "panic", v)
+
+			skip = true
+		}
+	}()
+
+	return t.config.Skip(r)
+}
+
+// observe hands the page the recorder saw to the worker, when it is a
+// page or a 404. A panic is recovered: the page is not counted, and it
+// still reaches the visitor.
+func (t *Tracker) observe(recorder *recorder, r *http.Request, elapsed time.Duration) {
+	defer func() {
+		if v := recover(); v != nil {
+			t.logger.Error("track: page not counted", "panic", v)
+		}
+	}()
+
+	status := recorder.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+
+	if status != http.StatusOK && status != http.StatusNotFound || !isHTML(recorder.Header()) {
+		return
+	}
+
+	kind := Pageview
+	if status == http.StatusNotFound {
+		kind = NotFound
+	}
+
+	s := t.sample(r, kind)
+	s.duration = elapsed
+
+	if kind == Pageview {
+		header := recorder.Header()
+		s.encoding = header.Get("Content-Encoding")
+		s.robots = slices.Clone(header.Values("X-Robots-Tag"))
+		s.cache = slices.Clone(header.Values("Cache-Control"))
+		s.head, recorder.head = recorder.head, nil
+	}
+
+	t.enqueue(s)
+}
+
+func isHTML(header http.Header) bool {
+	return strings.HasPrefix(header.Get("Content-Type"), "text/html")
 }
 
 // Event counts an event of the site's own, such as "signup" or "download",
 // for the visitor of r. The dashboard lists the events by name, with how
-// often they happened and for how many visitors.
+// often they happened and for how many visitors. Like the middleware, it
+// never waits.
 func (t *Tracker) Event(r *http.Request, name string) {
-	name = truncate(strings.Join(strings.Fields(name), " "), maxText)
-	if t.disabled || name == "" || isBot(r.UserAgent()) {
+	if t.disabled {
 		return
 	}
 
-	event := t.event(r, Custom)
-	event.Name = name
-	t.add(event)
-}
+	defer func() {
+		if v := recover(); v != nil {
+			t.logger.Error("track: event not counted", "panic", v)
+		}
+	}()
 
-// event is what the tracker sends for r.
-func (t *Tracker) event(r *http.Request, kind Kind) Event {
-	query := r.URL.Query()
-
-	source := query.Get("utm_source")
-	if source == "" {
-		source = query.Get("ref")
-	}
-
-	return Event{
-		Kind:      kind,
-		Time:      time.Now().UTC(),
-		Host:      t.host(r),
-		Path:      r.URL.Path,
-		Referrer:  referrer(r.Referer(), t.host(r)),
-		Source:    field(source),
-		Medium:    field(query.Get("utm_medium")),
-		Campaign:  field(query.Get("utm_campaign")),
-		Language:  language(r.Header.Get("Accept-Language")),
-		UserAgent: r.UserAgent(),
-		IP:        t.clientIP(r),
-	}
+	s := t.sample(r, Custom)
+	s.name = name
+	t.enqueue(s)
 }
 
 // host is the site's host name: Config.Hostname, or the request's host
@@ -224,6 +239,11 @@ func countable(r *http.Request) bool {
 		}
 	}
 
+	// WebSockets and server-sent events are no pages, and stay open.
+	if r.Header.Get("Upgrade") != "" || strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
+		return false
+	}
+
 	// htmx fragments and Turbo frames are parts of a page that was already
 	// counted; boosted links are real navigation.
 	if r.Header.Get("HX-Request") == "true" && r.Header.Get("HX-Boosted") != "true" {
@@ -237,20 +257,21 @@ func countable(r *http.Request) bool {
 	return !isBot(r.UserAgent())
 }
 
-// private reports whether a response asks not to be kept: search engines
-// may not index it (X-Robots-Tag: noindex or none, also for one crawler as
-// in "googlebot: noindex") or only the visitor's own browser may store it
-// (Cache-Control: private). Such pages show personal details or are endless
-// variations, such as search results; their addresses must not end up in
-// statistics. A bare "no-store" still counts: forms send it to stay fresh.
-func private(header http.Header) bool {
-	for _, value := range header.Values("X-Robots-Tag") {
+// private reports whether a response asks not to be kept, by its
+// X-Robots-Tag and Cache-Control values: search engines may not index it
+// (noindex or none, also for one crawler as in "googlebot: noindex") or
+// only the visitor's own browser may store it (private). Such pages show
+// personal details or are endless variations, such as search results;
+// their addresses must not end up in statistics. A bare "no-store" still
+// counts: forms send it to stay fresh.
+func private(robots, cache []string) bool {
+	for _, value := range robots {
 		if hasDirective(value, "noindex", "none") {
 			return true
 		}
 	}
 
-	for _, value := range header.Values("Cache-Control") {
+	for _, value := range cache {
 		if hasDirective(value, "private") {
 			return true
 		}
@@ -450,10 +471,10 @@ func truncate(s string, limit int) string {
 var gzipReaders sync.Pool
 
 // plainHead is the start of a page as the recorder kept it, decompressed
-// when the response is gzip-compressed. A compressed head is cut off, so it
-// decompresses into what it holds.
-func plainHead(header http.Header, head []byte) []byte {
-	if !strings.EqualFold(header.Get("Content-Encoding"), "gzip") {
+// when the response is gzip-compressed (encoding is its Content-Encoding).
+// A compressed head is cut off, so it decompresses into what it holds.
+func plainHead(encoding string, head []byte) []byte {
+	if !strings.EqualFold(encoding, "gzip") {
 		return head
 	}
 
@@ -481,17 +502,21 @@ func plainHead(header http.Header, head []byte) []byte {
 	return plain[:n]
 }
 
-// recorder notes the status of a response and keeps its first bytes, which
-// hold the page's title.
+// recorder notes the status of a response and keeps its first bytes,
+// which hold the page's title, in a buffer of the tracker's pool. It keeps
+// nothing of responses that are no HTML page.
 type recorder struct {
 	http.ResponseWriter
 
+	heads  *sync.Pool
 	status int
-	head   []byte
+	head   *[]byte
 }
 
 func (r *recorder) WriteHeader(status int) {
-	if r.status == 0 {
+	// Informational answers, such as 103 Early Hints, come before the
+	// real one.
+	if r.status == 0 && status >= 200 {
 		r.status = status
 	}
 
@@ -503,16 +528,51 @@ func (r *recorder) Write(data []byte) (int, error) {
 		r.status = http.StatusOK
 	}
 
-	if r.status == http.StatusOK && len(r.head) < maxHead {
-		r.head = append(r.head, data[:min(len(data), maxHead-len(r.head))]...)
+	if r.status == http.StatusOK {
+		r.keep(data)
 	}
 
 	return r.ResponseWriter.Write(data)
 }
 
+// keep copies the start of an HTML page, up to maxHead bytes.
+func (r *recorder) keep(data []byte) {
+	if r.head == nil {
+		if !isHTML(r.Header()) {
+			return
+		}
+
+		r.head, _ = r.heads.Get().(*[]byte)
+		if r.head == nil {
+			return
+		}
+
+		*r.head = (*r.head)[:0]
+	}
+
+	if room := maxHead - len(*r.head); room > 0 {
+		*r.head = append(*r.head, data[:min(len(data), room)]...)
+	}
+}
+
+// release returns the kept start of the page to the pool, unless the
+// worker took it.
+func (r *recorder) release() {
+	if r.head != nil {
+		r.heads.Put(r.head)
+		r.head = nil
+	}
+}
+
 // Flush keeps streaming responses working through the recorder.
 func (r *recorder) Flush() {
 	_ = http.NewResponseController(r.ResponseWriter).Flush()
+}
+
+// Hijack lets a handler take over the connection, as it could without the
+// recorder, or tells it that it cannot.
+func (r *recorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return http.NewResponseController(r.ResponseWriter).Hijack()
 }
 
 // Unwrap lets http.ResponseController reach the original writer.
