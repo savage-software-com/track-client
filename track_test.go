@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -166,9 +168,69 @@ func TestMiddlewareSkips(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	events := fake.received()
-	if len(events) != 1 || events[0].Path != "/boosted" {
-		t.Fatalf("events = %+v, want only /boosted", events)
+	// Bots come as bots, without an address; the 500 as a server error.
+	var got []string
+
+	for _, event := range fake.received() {
+		got = append(got, string(event.Kind)+" "+event.Path)
+
+		if event.Kind == Bot && (event.IP != "" || event.Referrer != "") {
+			t.Errorf("a bot's request carries more than its user agent: %+v", event)
+		}
+	}
+
+	// The worker and Flush make events side by side, in no fixed order.
+	want := []string{"bot /page", "bot /page", "error /broken", "pageview /boosted"}
+	slices.Sort(got)
+
+	if strings.Join(got, ", ") != strings.Join(want, ", ") {
+		t.Errorf("events = %v\nwant     %v", got, want)
+	}
+}
+
+func TestDownloads(t *testing.T) {
+	fake := &collector{}
+	server := httptest.NewServer(fake)
+	defer server.Close()
+
+	tracker := startTracker(t, server.URL)
+	file := tracker.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/pdf")
+
+		if r.Header.Get("Range") != "" {
+			w.WriteHeader(http.StatusPartialContent)
+		}
+
+		_, _ = io.WriteString(w, "%PDF-1.7")
+	}))
+
+	visit(file, http.MethodGet, "/files/Prices.PDF")
+	visit(file, http.MethodGet, "/files/manual.pdf", "Range", "bytes=0-65535")
+	visit(file, http.MethodGet, "/files/manual.pdf", "Range", "bytes=65536-131071")
+	visit(file, http.MethodGet, "/style.css")
+	visit(file, http.MethodHead, "/files/prices.pdf")
+	visit(file, http.MethodGet, "/files/prices.pdf", "User-Agent", "Mozilla/5.0 (compatible; bingbot/2.0; +http://www.bing.com/bingbot.htm)")
+
+	if err := tracker.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	var got []string
+	for _, event := range fake.received() {
+		got = append(got, string(event.Kind)+" "+event.Path)
+	}
+
+	want := []string{"bot /files/prices.pdf", "download /files/Prices.PDF", "download /files/manual.pdf"}
+	slices.Sort(got)
+
+	if strings.Join(got, ", ") != strings.Join(want, ", ") {
+		t.Errorf("events = %v\nwant     %v", got, want)
+	}
+
+	// An empty list counts no downloads.
+	none := startTracker(t, server.URL, func(c *Config) { c.Downloads = []string{} })
+	if none.classify(httptest.NewRequest(http.MethodGet, "/files/prices.pdf", nil)) != ignored {
+		t.Error("a download counted with Downloads empty")
 	}
 }
 

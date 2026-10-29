@@ -20,12 +20,15 @@
 // panic in the tracker is recovered and logged; the page is not counted.
 //
 // Counted are pages a person opens: GET requests answered with 200 and
-// text/html, without a file extension in the path. Not counted are files,
-// prefetches, htmx fragments (boosted links do count), bots, link previews,
-// monitors and scripts, recognised by their user agent, and pages that ask
-// not to be kept: "X-Robots-Tag: noindex", "Cache-Control: private" or
-// <meta name="robots" content="noindex">. Pages answered with 404 are counted
-// apart, so the dashboard lists the addresses visitors did not find.
+// text/html, without a file extension in the path. Not counted as pages
+// are files, prefetches, htmx fragments (boosted links do count), and pages
+// that ask not to be kept: "X-Robots-Tag: noindex", "Cache-Control:
+// private" or <meta name="robots" content="noindex">. Counted apart are
+// pages answered with 404, so the dashboard lists the addresses visitors
+// did not find; answers with 500 or more, the server errors visitors ran
+// into; downloads, files with an extension of Config.Downloads; and the
+// requests of bots, crawlers, link previews and scripts, by the user agent
+// only.
 //
 // What leaves the site for each view: the host, the path, the page's
 // <title>, how long the server took for it, the referring site (its host
@@ -110,6 +113,10 @@ type Config struct {
 	// Skip leaves requests it reports true for uncounted, such as those of
 	// the site's own editors.
 	Skip func(*http.Request) bool
+	// Downloads are the file extensions, such as ".pdf", whose requests
+	// count as downloads; DefaultDownloads when nil. An empty list counts
+	// none.
+	Downloads []string
 	// FlushInterval is how long events wait before they are sent; ten
 	// seconds when zero.
 	FlushInterval time.Duration
@@ -138,7 +145,23 @@ const (
 	// Custom is an event the site reports itself, such as a sign-up (see
 	// Tracker.Event).
 	Custom Kind = "event"
+	// ServerError is a request a visitor made that the site answered with
+	// 500 or more; Event.Status holds the status.
+	ServerError Kind = "error"
+	// Download is a file of Config.Downloads a visitor fetched.
+	Download Kind = "download"
+	// Bot is a request of a bot, crawler, link preview or script. It holds
+	// the user agent, never an address.
+	Bot Kind = "bot"
 )
+
+// DefaultDownloads are the extensions of the files that count as downloads
+// unless Config.Downloads says otherwise.
+var DefaultDownloads = []string{
+	".pdf", ".zip", ".rar", ".7z", ".gz", ".tgz", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+	".odt", ".ods", ".odp", ".csv", ".epub", ".mp3", ".mp4", ".mov", ".dmg", ".exe", ".msi", ".apk",
+	".ics", ".vcf",
+}
 
 // Event is one counted request, as it is sent to Track. Track keeps none of
 // it as it is: it adds it to the totals of its day.
@@ -168,6 +191,8 @@ type Event struct {
 	// microseconds: from the request reaching the middleware until the
 	// handler returned. Zero when it was not measured.
 	Duration int64 `json:"duration_us,omitempty"`
+	// Status is the status of a ServerError or a Bot request.
+	Status int `json:"status,omitempty"`
 }
 
 // Batch is the body of a post to the endpoint.
@@ -178,11 +203,12 @@ type Batch struct {
 // Tracker counts a site's page views and sends them to Track. It is safe
 // for concurrent use.
 type Tracker struct {
-	config   Config
-	proxies  []netip.Prefix
-	client   *http.Client
-	logger   *slog.Logger
-	disabled bool
+	config    Config
+	downloads map[string]bool
+	proxies   []netip.Prefix
+	client    *http.Client
+	logger    *slog.Logger
+	disabled  bool
 
 	mu      sync.Mutex
 	queue   []Event
@@ -232,6 +258,16 @@ func newTracker(config Config) (*Tracker, error) {
 		stop:    make(chan struct{}),
 		done:    make(chan struct{}),
 		worked:  make(chan struct{}),
+	}
+
+	downloads := config.Downloads
+	if downloads == nil {
+		downloads = DefaultDownloads
+	}
+
+	t.downloads = map[string]bool{}
+	for _, extension := range downloads {
+		t.downloads[strings.ToLower("."+strings.TrimPrefix(extension, "."))] = true
 	}
 
 	t.heads.New = func() any {

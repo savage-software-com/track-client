@@ -64,13 +64,21 @@ its dependencies.
 
 ## What is counted
 
-Pages a person opens: GET requests answered with 200 and `text/html`, without
-a file extension in the path. Not counted are files, form posts, prefetches,
-htmx fragments (boosted links do count), bots, link previews, monitors and
-scripts, and pages that ask not to be kept: `X-Robots-Tag: noindex`,
-`Cache-Control: private` or `<meta name="robots" content="noindex">`. Pages
-answered with 404 are counted apart, so the dashboard lists the addresses
-visitors did not find.
+- **Pages** a person opens: GET requests answered with 200 and `text/html`,
+  without a file extension in the path. Not counted are files, form posts,
+  prefetches, htmx fragments (boosted links do count), and pages that ask
+  not to be kept: `X-Robots-Tag: noindex`, `Cache-Control: private` or
+  `<meta name="robots" content="noindex">`.
+- **Pages not found:** the same requests answered with 404, so the dashboard
+  lists the addresses visitors did not find.
+- **Server errors:** requests a visitor made that were answered with 500 or
+  more, by path.
+- **Downloads:** files with an extension of `Downloads` (`.pdf`, `.zip`,
+  `.docx` and so on by default), answered whole or from their first byte, so
+  a PDF viewer that fetches a file in parts counts once.
+- **Bots, crawlers and scripts**, such as Googlebot, GPTBot, ClaudeBot or
+  curl, and AI assistants that fetch a page for their user (ChatGPT-User,
+  Claude-User): by their user agent only, never as visitors.
 
 Your own events, such as a sign-up, count with `Event`:
 
@@ -80,12 +88,13 @@ tracker.Event(r, "newsletter sign-up")
 
 ## What is sent
 
-For each view: the host, the path without the query, the page's `<title>`,
-how long your server took to make and send it, the host of the referring
-site, `utm_source` (or `ref`), `utm_medium` and `utm_campaign`, the
-browser's first language, the user agent and the IP address. Track looks up
-the country and city of the address and recognises the visitor for that day
-with a salted hash; the salt differs per site and per day and lives in
+For a bot, only its user agent, the host and the path. For each view, 404,
+server error and download: the host, the path without the query, the page's
+`<title>`, how long your server took to make and send it, the host of the
+referring site, `utm_source` (or `ref`), `utm_medium` and `utm_campaign`,
+the browser's first language, the user agent and the IP address. Track looks
+up the country and city of the address and recognises the visitor for that
+day with a salted hash; the salt differs per site and per day and lives in
 memory only. Track stores neither the address nor the user agent: only
 totals per day, each dimension on its own.
 
@@ -100,6 +109,7 @@ totals per day, each dimension on its own.
 | `TrustedProxies` | Proxies (addresses or CIDR ranges) whose `X-Forwarded-For`, `X-Real-IP` or `Forwarded` header names the visitor. Without them the visitor is `r.RemoteAddr`, which is right behind middleware such as go-router's or chi's `RealIP`. |
 | `ClientIP` | A function that returns the visitor's address, instead of the above. |
 | `Skip` | A function that leaves requests uncounted, such as your editors'. |
+| `Downloads` | The file extensions that count as downloads; `DefaultDownloads` when nil, none when empty. |
 | `FlushInterval`, `BatchSize`, `QueueSize` | 10 seconds, 250 events and 10,000 events by default. |
 | `HTTPClient`, `Logger` | A client with a 10 second timeout and `slog.Default()` by default. |
 

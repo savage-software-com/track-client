@@ -15,6 +15,7 @@ type sample struct {
 	kind     Kind
 	at       time.Time
 	duration time.Duration
+	status   int
 
 	host     string
 	path     string
@@ -34,8 +35,13 @@ type sample struct {
 	head *[]byte
 }
 
-// sample copies what the event of r needs.
+// sample copies what the event of r needs. A bot's request keeps its user
+// agent only: no address, referrer or language.
 func (t *Tracker) sample(r *http.Request, kind Kind) sample {
+	if kind == Bot {
+		return sample{kind: kind, at: time.Now().UTC(), host: t.host(r), path: r.URL.Path, agent: r.UserAgent()}
+	}
+
 	return sample{
 		kind:     kind,
 		at:       time.Now().UTC(),
@@ -109,7 +115,8 @@ func (t *Tracker) process(s sample) {
 		}
 	}()
 
-	if isBot(s.agent) {
+	// Bots are counted as bots, never as visitors.
+	if s.kind != Bot && isBot(s.agent) {
 		return
 	}
 
@@ -160,8 +167,13 @@ func (t *Tracker) eventOf(s sample) Event {
 		IP:        s.ip,
 	}
 
-	if s.kind != Custom {
+	switch s.kind {
+	case Pageview, NotFound, ServerError, Download:
 		event.Duration = microseconds(s.duration)
+	}
+
+	if s.kind == ServerError || s.kind == Bot {
+		event.Status = s.status
 	}
 
 	return event

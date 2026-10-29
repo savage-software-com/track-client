@@ -38,7 +38,8 @@ func (t *Tracker) Middleware(next http.Handler) http.Handler {
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !countable(r) || t.skip(r) {
+		request := t.classify(r)
+		if request == ignored || t.skip(r) {
 			next.ServeHTTP(w, r)
 
 			return
@@ -52,7 +53,7 @@ func (t *Tracker) Middleware(next http.Handler) http.Handler {
 		defer recorder.release()
 
 		next.ServeHTTP(recorder, r)
-		t.observe(recorder, r, time.Since(start))
+		t.observe(recorder, r, request, time.Since(start))
 	})
 }
 
@@ -74,10 +75,10 @@ func (t *Tracker) skip(r *http.Request) (skip bool) {
 	return t.config.Skip(r)
 }
 
-// observe hands the page the recorder saw to the worker, when it is a
-// page or a 404. A panic is recovered: the page is not counted, and it
-// still reaches the visitor.
-func (t *Tracker) observe(recorder *recorder, r *http.Request, elapsed time.Duration) {
+// observe hands what the recorder saw to the worker: a page, a 404, a
+// server error, a download or a bot's request. A panic is recovered: the
+// request is not counted, and the answer still reaches the visitor.
+func (t *Tracker) observe(recorder *recorder, r *http.Request, request requestKind, elapsed time.Duration) {
 	defer func() {
 		if v := recover(); v != nil {
 			t.logger.Error("track: page not counted", "panic", v)
@@ -89,17 +90,30 @@ func (t *Tracker) observe(recorder *recorder, r *http.Request, elapsed time.Dura
 		status = http.StatusOK
 	}
 
-	if status != http.StatusOK && status != http.StatusNotFound || !isHTML(recorder.Header()) {
-		return
-	}
+	var kind Kind
 
-	kind := Pageview
-	if status == http.StatusNotFound {
+	switch {
+	case request == botRequest:
+		kind = Bot
+	case status >= http.StatusInternalServerError:
+		kind = ServerError
+	case request == fileRequest:
+		if !wholeFile(r, status) {
+			return
+		}
+
+		kind = Download
+	case status == http.StatusOK && isHTML(recorder.Header()):
+		kind = Pageview
+	case status == http.StatusNotFound && isHTML(recorder.Header()):
 		kind = NotFound
+	default:
+		return
 	}
 
 	s := t.sample(r, kind)
 	s.duration = elapsed
+	s.status = status
 
 	if kind == Pageview {
 		header := recorder.Header()
@@ -110,6 +124,20 @@ func (t *Tracker) observe(recorder *recorder, r *http.Request, elapsed time.Dura
 	}
 
 	t.enqueue(s)
+}
+
+// wholeFile reports whether a download was the whole file, or its first
+// part: players and PDF viewers fetch one file in many ranges, which count
+// once.
+func wholeFile(r *http.Request, status int) bool {
+	switch status {
+	case http.StatusOK:
+		return true
+	case http.StatusPartialContent:
+		return strings.HasPrefix(strings.TrimSpace(r.Header.Get("Range")), "bytes=0-")
+	default:
+		return false
+	}
 }
 
 func isHTML(header http.Header) bool {
@@ -221,40 +249,61 @@ func forwardedFor(header http.Header) []string {
 	return hops
 }
 
-// countable reports whether r is a person opening a page: not a file, not a
-// form post, not a prefetch and not a known bot.
-func countable(r *http.Request) bool {
+// requestKind is what a request may count as, before it is answered.
+type requestKind int
+
+const (
+	ignored requestKind = iota
+	pageRequest
+	fileRequest
+	botRequest
+)
+
+// classify tells what r may count as: a page a person opens, a file of
+// Config.Downloads, a bot's request for either, or nothing, such as a form
+// post, a stylesheet, a prefetch or an htmx fragment.
+func (t *Tracker) classify(r *http.Request) requestKind {
 	if r.Method != http.MethodGet || len(r.URL.Path) > maxPath || !strings.HasPrefix(r.URL.Path, "/") {
-		return false
+		return ignored
 	}
 
-	if path.Ext(r.URL.Path) != "" {
-		return false
+	request := pageRequest
+
+	if extension := strings.ToLower(path.Ext(r.URL.Path)); extension != "" {
+		if !t.downloads[extension] {
+			return ignored
+		}
+
+		request = fileRequest
 	}
 
 	// Browsers announce speculative loads; the visitor may never see them.
 	for _, header := range []string{"Sec-Purpose", "Purpose", "X-Purpose", "X-Moz"} {
 		if strings.Contains(strings.ToLower(r.Header.Get(header)), "prefetch") {
-			return false
+			return ignored
 		}
 	}
 
 	// WebSockets and server-sent events are no pages, and stay open.
 	if r.Header.Get("Upgrade") != "" || strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
-		return false
+		return ignored
 	}
 
 	// htmx fragments and Turbo frames are parts of a page that was already
 	// counted; boosted links are real navigation.
 	if r.Header.Get("HX-Request") == "true" && r.Header.Get("HX-Boosted") != "true" {
-		return false
+		return ignored
 	}
 
 	if r.Header.Get("Turbo-Frame") != "" {
-		return false
+		return ignored
 	}
 
-	return !isBot(r.UserAgent())
+	if isBot(r.UserAgent()) {
+		return botRequest
+	}
+
+	return request
 }
 
 // private reports whether a response asks not to be kept, by its
@@ -333,6 +382,9 @@ var botMarkers = []string{
 	"phantomjs", "lighthouse", "pagespeed", "uptime", "monitor", "statuscake", "pingdom", "datadog", "newrelic",
 	"curl", "wget", "python", "go-http-client", "httpclient", "okhttp", "java/", "libwww", "scrapy", "axios",
 	"node-fetch", "feedfetcher", "validator", "chrome-lighthouse", "gtmetrix", "dataprovider", "httrack",
+	// AI assistants that fetch a page for their user name no "bot".
+	"chatgpt-user", "claude-user", "perplexity-user", "mistralai-user", "meta-externalagent",
+	"meta-externalfetcher", "anthropic-ai", "cohere-ai", "google-inspectiontool", "googleother",
 }
 
 // isBot reports user agents that are not a person's browser. Without a
