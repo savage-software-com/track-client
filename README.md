@@ -78,7 +78,9 @@ its dependencies.
   a PDF viewer that fetches a file in parts counts once.
 - **Bots, crawlers and scripts**, such as Googlebot, GPTBot, ClaudeBot or
   curl, and AI assistants that fetch a page for their user (ChatGPT-User,
-  Claude-User): by their user agent only, never as visitors.
+  Claude-User): by their user agent only, never as visitors. Feed readers
+  such as Feedly and Inoreader are counted on feeds too (`/feed.xml`), with
+  the number of subscribers their user agent reports.
 
 Your own events, such as a sign-up, count with `Event`:
 

@@ -227,6 +227,14 @@ func TestDownloads(t *testing.T) {
 		t.Errorf("events = %v\nwant     %v", got, want)
 	}
 
+	// A feed reader counts as a bot, also for a feed with an extension.
+	req := httptest.NewRequest(http.MethodGet, "/feed.xml", nil)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Inoreader/1.0; +http://www.inoreader.com/; 45 subscribers; )")
+
+	if tracker.classify(req) != botRequest {
+		t.Error("a feed reader's fetch of /feed.xml is not counted")
+	}
+
 	// An empty list counts no downloads.
 	none := startTracker(t, server.URL, func(c *Config) { c.Downloads = []string{} })
 	if none.classify(httptest.NewRequest(http.MethodGet, "/files/prices.pdf", nil)) != ignored {

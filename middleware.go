@@ -270,11 +270,16 @@ func (t *Tracker) classify(r *http.Request) requestKind {
 	request := pageRequest
 
 	if extension := strings.ToLower(path.Ext(r.URL.Path)); extension != "" {
-		if !t.downloads[extension] {
+		switch {
+		case t.downloads[extension]:
+			request = fileRequest
+		case feedReader(r.UserAgent()):
+			// Feed readers fetch feeds such as /feed.xml, and tell how
+			// many subscribers they have.
+			return botRequest
+		default:
 			return ignored
 		}
-
-		request = fileRequest
 	}
 
 	// Browsers announce speculative loads; the visitor may never see them.
@@ -382,6 +387,8 @@ var botMarkers = []string{
 	"phantomjs", "lighthouse", "pagespeed", "uptime", "monitor", "statuscake", "pingdom", "datadog", "newrelic",
 	"curl", "wget", "python", "go-http-client", "httpclient", "okhttp", "java/", "libwww", "scrapy", "axios",
 	"node-fetch", "feedfetcher", "validator", "chrome-lighthouse", "gtmetrix", "dataprovider", "httrack",
+	// Feed readers that tell their number of subscribers.
+	"subscriber",
 	// AI assistants that fetch a page for their user name no "bot".
 	"chatgpt-user", "claude-user", "perplexity-user", "mistralai-user", "meta-externalagent",
 	"meta-externalfetcher", "anthropic-ai", "cohere-ai", "google-inspectiontool", "googleother",
@@ -402,6 +409,12 @@ func isBot(agent string) bool {
 	}
 
 	return false
+}
+
+// feedReader reports whether agent is a feed reader that tells how many
+// subscribers it has, such as Feedly or Inoreader.
+func feedReader(agent string) bool {
+	return strings.Contains(strings.ToLower(agent), "subscriber")
 }
 
 // referrer is the host of the site the visitor came from, without "www.",
