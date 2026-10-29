@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/donseba/go-webthings v0.1.1
-	github.com/savage-software-com/track-client v0.0.0
+	github.com/savage-software-com/track-client v0.1.0
 )
 
 require (
@@ -40,6 +40,3 @@ require (
 	modernc.org/sqlite v1.60.1 // indirect
 	rsc.io/qr v0.2.0 // indirect
 )
-
-// Until the client has a release, the module uses the one next to it.
-replace github.com/savage-software-com/track-client => ../
