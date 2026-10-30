@@ -530,7 +530,7 @@ func (t *Tracker) send(ctx context.Context, batch []Event) error {
 		return err
 	}
 
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	message, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 

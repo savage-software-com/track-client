@@ -135,7 +135,7 @@ func TestPanicsDoNotBreakPages(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			defer tracker.Close(context.Background())
+			defer func() { _ = tracker.Close(context.Background()) }()
 
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			req.Header.Set("User-Agent", browser)
@@ -186,7 +186,7 @@ func TestHijackThroughTheRecorder(t *testing.T) {
 			return
 		}
 
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
 		_, _ = buf.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nhijacked")
 		_ = buf.Flush()
@@ -201,7 +201,7 @@ func TestHijackThroughTheRecorder(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	if string(body) != "hijacked" {
@@ -250,7 +250,7 @@ func BenchmarkMiddleware(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	defer tracker.Close(context.Background())
+	defer func() { _ = tracker.Close(context.Background()) }()
 
 	req := httptest.NewRequest(http.MethodGet, "/page?utm_source=news", nil)
 	req.Header.Set("User-Agent", browser)
