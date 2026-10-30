@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# Two modules: the client at the root, without dependencies, and trackwt,
+# which uses the released client with go-webthings.
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.3'
+          cache-dependency-path: trackwt/go.sum
+      - name: Check gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: Run go vet
+        run: |
+          go vet ./...
+          cd trackwt && go vet ./...
+      # Built with this Go, so it reads the packages of this Go version.
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+      - name: Run golangci-lint
+        run: |
+          golangci-lint run ./...
+          cd trackwt && golangci-lint run ./...
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # The oldest Go of go.mod, and the newest.
+        go: ['1.24', '1.27.3']
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+          cache: false
+      - name: Run tests
+        run: go test -race -cover ./...
