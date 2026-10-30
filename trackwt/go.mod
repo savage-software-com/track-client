@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/donseba/go-webthings v0.1.1
-	github.com/savage-software-com/track-client v0.1.0
+	github.com/savage-software-com/track-client v0.2.0
 )
 
 require (
