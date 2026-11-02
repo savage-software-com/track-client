@@ -178,6 +178,10 @@ type Event struct {
 	// Referrer is the host of the site the visitor came from, without
 	// "www.": empty for direct visits and for links within the site.
 	Referrer string `json:"referrer,omitempty"`
+	// From is the path of the page of this site the visitor came from,
+	// without its query, for a Pageview or a NotFound: empty for direct
+	// visits and for links from other sites.
+	From string `json:"from,omitempty"`
 	// Source, Medium and Campaign are the address's utm_source (or ref),
 	// utm_medium and utm_campaign.
 	Source   string `json:"source,omitempty"`
@@ -186,7 +190,8 @@ type Event struct {
 	// Language is the first language the browser asks for, such as "nl".
 	Language  string `json:"language,omitempty"`
 	UserAgent string `json:"user_agent"`
-	IP        string `json:"ip"`
+	// IP is the visitor's network, not the address itself: see MaskIP.
+	IP string `json:"ip"`
 	// Duration is how long the site took to make and send the page, in
 	// microseconds: from the request reaching the middleware until the
 	// handler returned. Zero when it was not measured.

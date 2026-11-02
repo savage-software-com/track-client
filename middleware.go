@@ -448,6 +448,56 @@ func referrer(value, own string) string {
 	return host
 }
 
+// cameFrom is the path of value when it is a page of the site on the host
+// own, without its query; "" for anything else. A link from another site is
+// the referrer's business.
+func cameFrom(value, own string) string {
+	from, err := url.Parse(value)
+	if err != nil || from.Scheme != "http" && from.Scheme != "https" {
+		return ""
+	}
+
+	if strings.TrimPrefix(strings.ToLower(from.Hostname()), "www.") != strings.TrimPrefix(own, "www.") {
+		return ""
+	}
+
+	if from.Path == "" {
+		return "/"
+	}
+
+	if !strings.HasPrefix(from.Path, "/") || len(from.Path) > maxPath {
+		return ""
+	}
+
+	return from.Path
+}
+
+// MaskIP shortens an address to its network, so the address of one visitor
+// never leaves the site: it drops the last byte of an IPv4 address and all but
+// the first 48 bits of an IPv6 address, which can belong to one household for
+// a long time. The network still tells the country and usually the city. Not
+// an address gives "".
+func MaskIP(ip string) string {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ""
+	}
+
+	addr = addr.Unmap().WithZone("")
+
+	bits := 24
+	if addr.Is6() {
+		bits = 48
+	}
+
+	network, err := addr.Prefix(bits)
+	if err != nil {
+		return ""
+	}
+
+	return network.Addr().String()
+}
+
 // language is the primary subtag of the first language the browser asks
 // for, such as "nl" for "nl-NL,nl;q=0.9,en;q=0.8".
 func language(accept string) string {

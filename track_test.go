@@ -125,7 +125,7 @@ func TestMiddlewareCountsPages(t *testing.T) {
 	got.Duration = 0
 	want := Event{
 		Kind: Pageview, Host: "example.com", Path: "/about", Title: "About & us", Referrer: "google.com",
-		Source: "news", Campaign: "Autumn sale", Language: "nl", UserAgent: browser, IP: "192.0.2.1",
+		Source: "news", Campaign: "Autumn sale", Language: "nl", UserAgent: browser, IP: "192.0.2.0",
 	}
 
 	got.Time = time.Time{}
@@ -257,6 +257,64 @@ func TestMiddlewareCountsNotFound(t *testing.T) {
 	events := fake.received()
 	if len(events) != 1 || events[0].Kind != NotFound || events[0].Path != "/old-page" {
 		t.Fatalf("events = %+v", events)
+	}
+}
+
+func TestMaskIP(t *testing.T) {
+	tests := map[string]string{
+		"203.0.113.9":             "203.0.113.0",
+		"::ffff:203.0.113.9":      "203.0.113.0",
+		"2001:db8:1234:5678::1":   "2001:db8:1234::",
+		"2001:db8:abcd:1:2:3:4:5": "2001:db8:abcd::",
+		"fe80::1%eth0":            "fe80::",
+		"":                        "",
+		"not an address":          "",
+	}
+
+	for ip, want := range tests {
+		if got := MaskIP(ip); got != want {
+			t.Errorf("MaskIP(%q) = %q, want %q", ip, got, want)
+		}
+	}
+}
+
+func TestMiddlewareSendsNoFullAddressAndThePreviousPage(t *testing.T) {
+	fake := &collector{}
+	server := httptest.NewServer(fake)
+	defer server.Close()
+
+	tracker := startTracker(t, server.URL, func(c *Config) {
+		c.ClientIP = func(*http.Request) string { return "203.0.113.9" }
+	})
+	handler := tracker.Middleware(page(200, "<title>A page</title>"))
+
+	tests := []struct{ referer, from, referrer string }{
+		{"https://example.com/pricing?coupon=abc#top", "/pricing", ""},
+		{"https://www.example.com/", "/", ""},
+		{"https://example.com", "/", ""},
+		{"https://other.example/pricing", "", "other.example"},
+		{"android-app://com.example/", "", ""},
+		{"", "", ""},
+	}
+
+	for _, test := range tests {
+		visit(handler, http.MethodGet, "https://example.com/next", "Referer", test.referer)
+	}
+
+	if err := tracker.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	events := fake.received()
+	if len(events) != len(tests) {
+		t.Fatalf("%d events, want %d", len(events), len(tests))
+	}
+
+	for i, test := range tests {
+		event := events[i]
+		if event.From != test.from || event.Referrer != test.referrer || event.IP != "203.0.113.0" {
+			t.Errorf("Referer %q: from %q, referrer %q, ip %q", test.referer, event.From, event.Referrer, event.IP)
+		}
 	}
 }
 

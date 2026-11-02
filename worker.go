@@ -164,7 +164,11 @@ func (t *Tracker) eventOf(s sample) Event {
 		Campaign:  field(query.Get("utm_campaign")),
 		Language:  language(s.language),
 		UserAgent: s.agent,
-		IP:        s.ip,
+		IP:        MaskIP(s.ip),
+	}
+
+	if s.kind == Pageview || s.kind == NotFound {
+		event.From = cameFrom(s.referer, s.host)
 	}
 
 	switch s.kind {
