@@ -3,6 +3,7 @@ package track
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -641,21 +642,26 @@ func TestMiddlewareSendsNoFullAddressAndThePreviousPage(t *testing.T) {
 		{"", "", ""},
 	}
 
-	for _, test := range tests {
-		visit(handler, http.MethodGet, "https://example.com/next", "Referer", test.referer)
+	for i, test := range tests {
+		visit(handler, http.MethodGet, fmt.Sprintf("https://example.com/next%d", i), "Referer", test.referer)
 	}
 
 	if err := tracker.Flush(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
-	events := fake.received()
+	// Events need not arrive in the order of the visits.
+	events := map[string]Event{}
+	for _, event := range fake.received() {
+		events[event.Path] = event
+	}
+
 	if len(events) != len(tests) {
 		t.Fatalf("%d events, want %d", len(events), len(tests))
 	}
 
 	for i, test := range tests {
-		event := events[i]
+		event := events[fmt.Sprintf("/next%d", i)]
 		if event.From != test.from || event.Referrer != test.referrer || event.IP != "203.0.113.0" {
 			t.Errorf("Referer %q: from %q, referrer %q, ip %q", test.referer, event.From, event.Referrer, event.IP)
 		}
