@@ -1,0 +1,32 @@
+name: Security
+
+# Looks for known vulnerabilities in the code and its dependencies, also when
+# nothing changes here. A failed run is mailed by GitHub.
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/security.yml
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          # The Go that production is built with: fixes in a newer one do not
+          # help until it is used.
+          go-version: '1.27.3'
+          cache: false
+      - name: Run govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      - name: Run govulncheck on trackwt
+        working-directory: trackwt
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...

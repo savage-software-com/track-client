@@ -38,6 +38,14 @@ func (t *Tracker) Middleware(next http.Handler) http.Handler {
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if checked, done := t.checkRequest(w, r); checked {
+			if !done {
+				next.ServeHTTP(w, r)
+			}
+
+			return
+		}
+
 		if r.URL.Path == t.config.OptOutPath {
 			t.optOut(w, r)
 

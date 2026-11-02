@@ -74,6 +74,17 @@ browser that sends Global Privacy Control (`Sec-GPC: 1`) or Do Not Track
 visits are only in totals per day. Only visitors can object: bots and scan
 attempts are counted without anything about a person, whatever they send.
 
+## Security check
+
+If you turn it on in Track, Track looks at your site from outside once a day.
+Its requests carry a signature made with your token: the middleware answers
+with proof that it holds the same token, so Track only looks at sites it knows
+are yours, and these requests are not counted. A signed request for
+`/track-check` is also told the Go version and modules the server is built
+with, from the binary itself, to compare with known vulnerabilities. Nothing
+about visitors is in it, and without the signature that address is like any
+other.
+
 ## What is counted
 
 - **Pages** a person opens: GET requests answered with 200 and `text/html`,

@@ -261,6 +261,98 @@ func TestMiddlewareCountsNotFound(t *testing.T) {
 	}
 }
 
+func TestSecurityCheck(t *testing.T) {
+	fake := &collector{}
+	server := httptest.NewServer(fake)
+	defer server.Close()
+
+	tracker := startTracker(t, server.URL)
+
+	site := httptest.NewServer(tracker.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.env" {
+			http.NotFound(w, r)
+
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, "<title>A page</title>")
+	})))
+	defer site.Close()
+
+	key := TokenKey("trk_test")
+
+	get := func(path, signature string) (*http.Response, string) {
+		req, err := http.NewRequest(http.MethodGet, site.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		req.Header.Set("User-Agent", browser)
+
+		if signature != "" {
+			req.Header.Set(CheckHeader, signature)
+		}
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		body, _ := io.ReadAll(resp.Body)
+
+		return resp, string(body)
+	}
+
+	// A real signature gets proof, and its requests are not counted.
+	resp, body := get("/", SignCheck(key, time.Now(), "n1"))
+	if resp.Header.Get(CheckProofHeader) != CheckProof(key, "n1") || !strings.Contains(body, "A page") {
+		t.Errorf("proof %q, body %q", resp.Header.Get(CheckProofHeader), body)
+	}
+
+	if resp, _ := get("/.env", SignCheck(key, time.Now(), "n2")); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("/.env: %d", resp.StatusCode)
+	}
+
+	resp, body = get(CheckPath, SignCheck(key, time.Now(), "n3"))
+
+	var report CheckReport
+	if err := json.Unmarshal([]byte(body), &report); err != nil || report.Go == "" || resp.Header.Get(CheckProofHeader) == "" {
+		t.Errorf("report %q: %v", body, err)
+	}
+
+	if err := tracker.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if events := fake.received(); len(events) != 0 {
+		t.Errorf("a signed request was counted: %+v", events)
+	}
+
+	// Anything else is an ordinary request: no proof, no report, and counted,
+	// so a scanner cannot hide behind a made-up signature.
+	for _, signature := range []string{
+		"", "nonsense", "1.2.3",
+		SignCheck(TokenKey("trk_other"), time.Now(), "n4"),
+		SignCheck(key, time.Now().Add(-time.Hour), "n5"),
+		SignCheck(key, time.Now().Add(time.Hour), "n6"),
+	} {
+		resp, body := get("/.env", signature)
+		if resp.Header.Get(CheckProofHeader) != "" || resp.StatusCode != http.StatusNotFound || strings.Contains(body, "modules") {
+			t.Errorf("signature %q: proof %q, status %d", signature, resp.Header.Get(CheckProofHeader), resp.StatusCode)
+		}
+	}
+
+	if err := tracker.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if events := fake.received(); len(events) != 6 {
+		t.Errorf("%d events, want the 6 ordinary requests", len(events))
+	}
+}
+
 func TestProbeKind(t *testing.T) {
 	tests := map[string]string{
 		"/.git/config":                    ProbeSource,
