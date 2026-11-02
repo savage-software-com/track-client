@@ -260,6 +260,121 @@ func TestMiddlewareCountsNotFound(t *testing.T) {
 	}
 }
 
+func TestMiddlewareGoesByTheTypeTheVisitorReceives(t *testing.T) {
+	plainNotFound := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
+
+	write := func(status int, headers map[string]string, parts ...string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			for name, value := range headers {
+				w.Header().Set(name, value)
+			}
+
+			if status != http.StatusOK {
+				w.WriteHeader(status)
+			}
+
+			for _, part := range parts {
+				_, _ = io.WriteString(w, part)
+			}
+		})
+	}
+
+	json := map[string]string{"Content-Type": "application/json"}
+	const html = "<!doctype html><html><head><title>Hello</title></head></html>"
+
+	tests := []struct {
+		name    string
+		handler http.Handler
+		kind    Kind
+		title   string
+	}{
+		{"a page that names no type", write(http.StatusOK, nil, html), Pageview, "Hello"},
+		{"a page written in small parts", write(http.StatusOK, nil, "<!doc", "type html><html><head>", "<title>Hello</title>"), Pageview, "Hello"},
+		{"plain text that names no type", write(http.StatusOK, nil, "just some text"), "", ""},
+		{"JSON", write(http.StatusOK, json, `{"a":1}`), "", ""},
+		{"compressed without a type", write(http.StatusOK, map[string]string{"Content-Encoding": "gzip"}, html), "", ""},
+		{"nothing at all", write(http.StatusOK, nil), "", ""},
+		{"net/http's own 404", plainNotFound, NotFound, ""},
+		{"a 404 page that names no type", write(http.StatusNotFound, nil, html), NotFound, ""},
+		{"a plain 404 that names no type", write(http.StatusNotFound, nil, "not here"), NotFound, ""},
+		{"the 404 of an API", write(http.StatusNotFound, json, `{"error":"gone"}`), "", ""},
+		{"an empty 404", write(http.StatusNotFound, nil), "", ""},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &collector{}
+			server := httptest.NewServer(fake)
+			defer server.Close()
+
+			tracker := startTracker(t, server.URL)
+
+			// A real server: httptest's recorder fills in the type itself.
+			site := httptest.NewServer(tracker.Middleware(test.handler))
+			defer site.Close()
+
+			req, err := http.NewRequest(http.MethodGet, site.URL+"/some-page", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			req.Header.Set("User-Agent", browser)
+			req.Header.Set("Accept-Encoding", "identity")
+
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_ = resp.Body.Close()
+
+			if err := tracker.Flush(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+
+			events := fake.received()
+
+			if test.kind == "" {
+				if len(events) != 0 {
+					t.Fatalf("counted: %+v", events)
+				}
+
+				return
+			}
+
+			if len(events) != 1 || events[0].Kind != test.kind || events[0].Title != test.title {
+				t.Fatalf("events = %+v, want one %s titled %q", events, test.kind, test.title)
+			}
+		})
+	}
+}
+
+func TestMiddlewareKeepsWhatTheVisitorReceives(t *testing.T) {
+	const html = "<!doctype html><title>Hello</title>"
+
+	fake := &collector{}
+	server := httptest.NewServer(fake)
+	defer server.Close()
+
+	tracker := startTracker(t, server.URL)
+
+	site := httptest.NewServer(tracker.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, html)
+	})))
+	defer site.Close()
+
+	resp, err := http.Get(site.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != html || resp.Header.Get("Content-Type") != "text/html; charset=utf-8" {
+		t.Fatalf("got %q as %q", body, resp.Header.Get("Content-Type"))
+	}
+}
+
 func TestCustomEvent(t *testing.T) {
 	fake := &collector{}
 	server := httptest.NewServer(fake)

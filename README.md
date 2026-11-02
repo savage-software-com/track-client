@@ -65,12 +65,14 @@ its dependencies.
 ## What is counted
 
 - **Pages** a person opens: GET requests answered with 200 and `text/html`,
+  named by your handler or worked out by Go from the start of the page,
   without a file extension in the path. Not counted are files, form posts,
   prefetches, htmx fragments (boosted links do count), and pages that ask
   not to be kept: `X-Robots-Tag: noindex`, `Cache-Control: private` or
   `<meta name="robots" content="noindex">`.
-- **Pages not found:** the same requests answered with 404, so the dashboard
-  lists the addresses visitors did not find.
+- **Pages not found:** the same requests answered with 404, as a page or as
+  plain text such as Go's own `404 page not found`, but not as JSON, so the
+  dashboard lists the addresses visitors did not find.
 - **Server errors:** requests a visitor made that were answered with 500 or
   more, by path.
 - **Downloads:** files with an extension of `Downloads` (`.pdf`, `.zip`,

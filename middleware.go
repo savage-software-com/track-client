@@ -103,9 +103,9 @@ func (t *Tracker) observe(recorder *recorder, r *http.Request, request requestKi
 		}
 
 		kind = Download
-	case status == http.StatusOK && isHTML(recorder.Header()):
+	case status == http.StatusOK && isHTML(recorder.contentType()):
 		kind = Pageview
-	case status == http.StatusNotFound && isHTML(recorder.Header()):
+	case status == http.StatusNotFound && isReadable(recorder.contentType()):
 		kind = NotFound
 	default:
 		return
@@ -140,8 +140,23 @@ func wholeFile(r *http.Request, status int) bool {
 	}
 }
 
-func isHTML(header http.Header) bool {
-	return strings.HasPrefix(header.Get("Content-Type"), "text/html")
+func isHTML(contentType string) bool {
+	return strings.HasPrefix(contentType, "text/html")
+}
+
+// isReadable reports whether a missing page's answer is meant for a person: a
+// page, or the plain "404 page not found" of net/http and most routers. The
+// JSON of an API is not.
+func isReadable(contentType string) bool {
+	return isHTML(contentType) || strings.HasPrefix(contentType, "text/plain")
+}
+
+// sniffs reports whether net/http works out the type of an answer with these
+// headers from its first bytes, as it does when a handler names none.
+func sniffs(header http.Header) bool {
+	_, named := header["Content-Type"]
+
+	return !named && header.Get("Content-Encoding") == ""
 }
 
 // Event counts an event of the site's own, such as "signup" or "download",
@@ -567,15 +582,18 @@ func plainHead(encoding string, head []byte) []byte {
 	return plain[:n]
 }
 
-// recorder notes the status of a response and keeps its first bytes,
-// which hold the page's title, in a buffer of the tracker's pool. It keeps
-// nothing of responses that are no HTML page.
+// recorder notes the status of a response and keeps its first bytes, which
+// hold the page's title, in a buffer of the tracker's pool. It keeps nothing
+// of responses that say they are no HTML page.
 type recorder struct {
 	http.ResponseWriter
 
 	heads  *sync.Pool
 	status int
 	head   *[]byte
+	wrote  bool
+	// sniffed is set when the handler named no type before its first write.
+	sniffed bool
 }
 
 func (r *recorder) WriteHeader(status int) {
@@ -593,17 +611,37 @@ func (r *recorder) Write(data []byte) (int, error) {
 		r.status = http.StatusOK
 	}
 
-	if r.status == http.StatusOK {
+	if !r.wrote {
+		r.wrote = true
+		r.sniffed = sniffs(r.Header())
+	}
+
+	if r.status == http.StatusOK || r.sniffed && r.status == http.StatusNotFound {
 		r.keep(data)
 	}
 
 	return r.ResponseWriter.Write(data)
 }
 
-// keep copies the start of an HTML page, up to maxHead bytes.
+// contentType is the type the visitor receives: the one the handler named, or
+// the one net/http works out from the same first bytes.
+func (r *recorder) contentType() string {
+	if !r.sniffed {
+		return r.Header().Get("Content-Type")
+	}
+
+	if r.head == nil || len(*r.head) == 0 {
+		return ""
+	}
+
+	return http.DetectContentType(*r.head)
+}
+
+// keep copies the start of a page, or of what may turn out to be one, up to
+// maxHead bytes.
 func (r *recorder) keep(data []byte) {
 	if r.head == nil {
-		if !isHTML(r.Header()) {
+		if !r.sniffed && !isHTML(r.Header().Get("Content-Type")) {
 			return
 		}
 
