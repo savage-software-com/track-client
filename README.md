@@ -133,6 +133,14 @@ visitor for that day with a salted hash; the salt differs per site and per
 day and lives in memory only. Track stores neither the network nor the user
 agent: only totals per day.
 
+## Recognising programs dressed up as browsers
+
+Modern browsers always send fetch metadata such as `Sec-Fetch-Mode`, and Chrome
+also client hints such as `Sec-Ch-Ua`, over HTTPS. A request that claims such a
+browser without them gets `suspect: "headers"` in its event, so Track can show how
+many there are. It looks only at whether these headers are there; none of their
+values leave the server, and the visit still counts.
+
 ## Configuration
 
 | Field | |

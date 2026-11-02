@@ -25,6 +25,7 @@ type sample struct {
 	agent    string
 	ip       string
 	name     string
+	suspect  bool
 
 	// encoding, robots and cache are the response's Content-Encoding,
 	// X-Robots-Tag and Cache-Control.
@@ -57,6 +58,7 @@ func (t *Tracker) sample(r *http.Request, kind Kind) sample {
 		language: r.Header.Get("Accept-Language"),
 		agent:    r.UserAgent(),
 		ip:       t.clientIP(r),
+		suspect:  lacksBrowserHeaders(r),
 	}
 }
 
@@ -174,6 +176,10 @@ func (t *Tracker) eventOf(s sample) Event {
 
 	if s.kind == Pageview || s.kind == NotFound {
 		event.From = cameFrom(s.referer, s.host)
+	}
+
+	if s.suspect {
+		event.Suspect = SuspectHeaders
 	}
 
 	switch s.kind {

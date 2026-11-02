@@ -939,3 +939,88 @@ func TestLanguage(t *testing.T) {
 		}
 	}
 }
+
+func TestRequestsThatOnlyCallThemselvesABrowser(t *testing.T) {
+	const (
+		chrome  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+		edge    = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0"
+		webview = "Mozilla/5.0 (Linux; Android 14; Pixel 8; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/130.0.0.0 Mobile Safari/537.36"
+		oldOne  = "Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/70.0.0.0 Safari/537.36"
+		firefox = "Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0"
+		safari  = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+		older   = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.1 Safari/605.1.15"
+		iphone  = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/130.0 Mobile/15E148 Safari/604.1"
+	)
+
+	for _, test := range []struct {
+		name    string
+		agent   string
+		headers map[string]string
+		want    bool
+	}{
+		{"Chrome as it is", chrome, map[string]string{"Sec-Fetch-Mode": "navigate", "Sec-Ch-Ua": `"Chromium";v="130"`}, false},
+		{"Chrome without anything", chrome, nil, true},
+		{"Chrome that forgot its hints", chrome, map[string]string{"Sec-Fetch-Mode": "navigate"}, true},
+		{"Edge without anything", edge, nil, true},
+		{"a WebView needs no hints", webview, map[string]string{"Sec-Fetch-Mode": "navigate"}, false},
+		{"a WebView without metadata", webview, nil, true},
+		{"a version from before metadata says nothing", oldOne, nil, false},
+		{"Firefox as it is", firefox, map[string]string{"Sec-Fetch-Mode": "navigate"}, false},
+		{"Firefox without anything", firefox, nil, true},
+		{"Safari as it is", safari, map[string]string{"Sec-Fetch-Mode": "navigate"}, false},
+		{"Safari without anything", safari, nil, true},
+		{"an old Safari says nothing", older, nil, false},
+		{"Chrome on an iPhone is Safari inside", iphone, nil, false},
+		{"something else says nothing", "SomeBrowser/1.0", nil, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "https://example.com/", nil)
+			req.Header.Set("User-Agent", test.agent)
+			req.Header.Set("X-Forwarded-Proto", "https")
+
+			for name, value := range test.headers {
+				req.Header.Set(name, value)
+			}
+
+			if got := lacksBrowserHeaders(req); got != test.want {
+				t.Errorf("lacksBrowserHeaders = %v, want %v", got, test.want)
+			}
+		})
+	}
+
+	// Over plain HTTP browsers send none of this.
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	req.Header.Set("User-Agent", chrome)
+
+	if lacksBrowserHeaders(req) {
+		t.Error("a request over plain HTTP counts as suspect")
+	}
+}
+
+func TestSuspectVisitStillCounts(t *testing.T) {
+	fake := &collector{}
+	server := httptest.NewServer(fake)
+	defer server.Close()
+
+	tracker := startTracker(t, server.URL)
+	handler := tracker.Middleware(page(200, "<title>A page</title>"))
+
+	const chrome = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+
+	visit(handler, http.MethodGet, "https://example.com/plain", "User-Agent", chrome, "X-Forwarded-Proto", "https")
+	visit(handler, http.MethodGet, "https://example.com/real", "User-Agent", chrome, "X-Forwarded-Proto", "https",
+		"Sec-Fetch-Mode", "navigate", "Sec-Ch-Ua", `"Chromium";v="130"`)
+
+	if err := tracker.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	got := map[string]string{}
+	for _, event := range fake.received() {
+		got[event.Path] = event.Suspect
+	}
+
+	if len(got) != 2 || got["/plain"] != SuspectHeaders || got["/real"] != "" {
+		t.Errorf("suspects = %v", got)
+	}
+}

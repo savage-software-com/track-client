@@ -215,6 +215,9 @@ type Event struct {
 	Duration int64 `json:"duration_us,omitempty"`
 	// Status is the status of a ServerError, a Probe or a Bot request.
 	Status int `json:"status,omitempty"`
+	// Suspect says why the request looks like a program dressed up as a
+	// browser, such as SuspectHeaders; empty when nothing does.
+	Suspect string `json:"suspect,omitempty"`
 }
 
 // Batch is the body of a post to the endpoint.
