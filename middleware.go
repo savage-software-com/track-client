@@ -38,8 +38,14 @@ func (t *Tracker) Middleware(next http.Handler) http.Handler {
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == t.config.OptOutPath {
+			t.optOut(w, r)
+
+			return
+		}
+
 		request := t.classify(r)
-		if request == ignored || t.skip(r) {
+		if request == ignored || optsOut(r) || t.skip(r) {
 			next.ServeHTTP(w, r)
 
 			return
@@ -173,6 +179,10 @@ func (t *Tracker) Event(r *http.Request, name string) {
 			t.logger.Error("track: event not counted", "panic", v)
 		}
 	}()
+
+	if optsOut(r) {
+		return
+	}
 
 	s := t.sample(r, Custom)
 	s.name = name

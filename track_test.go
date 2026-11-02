@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -257,6 +258,125 @@ func TestMiddlewareCountsNotFound(t *testing.T) {
 	events := fake.received()
 	if len(events) != 1 || events[0].Kind != NotFound || events[0].Path != "/old-page" {
 		t.Fatalf("events = %+v", events)
+	}
+}
+
+func TestOptOut(t *testing.T) {
+	fake := &collector{}
+	server := httptest.NewServer(fake)
+	defer server.Close()
+
+	tracker := startTracker(t, server.URL, func(c *Config) { c.OptOutDomain = "example.com" })
+
+	site := httptest.NewServer(tracker.Middleware(page(200, "<title>A page</title>")))
+	defer site.Close()
+
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+	get := func(path string, headers ...string) (*http.Response, string) {
+		req, err := http.NewRequest(http.MethodGet, site.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		req.Header.Set("User-Agent", browser)
+		req.Header.Set("Accept-Language", "nl-NL,nl;q=0.9")
+
+		for i := 0; i+1 < len(headers); i += 2 {
+			req.Header.Set(headers[i], headers[i+1])
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		body, _ := io.ReadAll(resp.Body)
+
+		return resp, string(body)
+	}
+
+	// The page is in the visitor's language, and is not counted itself.
+	resp, body := get(DefaultOptOutPath)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "Tel mijn bezoeken niet mee") || !strings.Contains(body, `value="out"`) {
+		t.Fatalf("page: %d %s", resp.StatusCode, body)
+	}
+
+	if resp.Header.Get("Set-Cookie") != "" {
+		t.Error("looking at the page set a cookie")
+	}
+
+	form := url.Values{"choice": {"out"}}
+
+	post, err := client.PostForm(site.URL+DefaultOptOutPath, form)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = post.Body.Close()
+
+	if post.StatusCode != http.StatusSeeOther || len(post.Cookies()) != 1 {
+		t.Fatalf("post: %d %v", post.StatusCode, post.Cookies())
+	}
+
+	cookie := post.Cookies()[0]
+	if cookie.Name != OptOutCookie || cookie.Value != "1" || cookie.MaxAge <= 0 || !cookie.HttpOnly || cookie.Domain != "example.com" {
+		t.Errorf("cookie = %+v", cookie)
+	}
+
+	// Who objected, by cookie or by the browser's signal, is not counted.
+	chosen := OptOutCookie + "=1"
+
+	_, body = get("/page", "Cookie", chosen)
+	if !strings.Contains(body, "A page") {
+		t.Errorf("the page did not reach a visitor who objected: %s", body)
+	}
+
+	get("/page", "Sec-GPC", "1")
+	get("/page", "DNT", "1")
+
+	_, body = get(DefaultOptOutPath, "Cookie", chosen)
+	if !strings.Contains(body, "Tel mijn bezoeken weer mee") {
+		t.Errorf("no way back: %s", body)
+	}
+
+	_, body = get(DefaultOptOutPath, "Sec-GPC", "1")
+	if !strings.Contains(body, "Global Privacy Control") || strings.Contains(body, "<form") {
+		t.Errorf("the browser's signal: %s", body)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/signup", nil)
+	req.Header.Set("User-Agent", browser)
+	req.Header.Set("Sec-GPC", "1")
+	tracker.Event(req, "sign up")
+
+	if err := tracker.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if events := fake.received(); len(events) != 0 {
+		t.Errorf("counted: %+v", events)
+	}
+
+	// Everyone else still is, and going back clears the cookie.
+	get("/page")
+
+	if err := tracker.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if events := fake.received(); len(events) != 1 {
+		t.Errorf("events = %+v", events)
+	}
+
+	post, err = client.PostForm(site.URL+DefaultOptOutPath, url.Values{"choice": {"in"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = post.Body.Close()
+
+	if cookies := post.Cookies(); len(cookies) != 1 || cookies[0].MaxAge >= 0 {
+		t.Errorf("going back: %v", cookies)
 	}
 }
 

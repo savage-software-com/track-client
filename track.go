@@ -32,11 +32,15 @@
 //
 // What leaves the site for each view: the host, the path, the page's
 // <title>, how long the server took for it, the referring site (its host
-// only), the utm_source, utm_medium and utm_campaign of the address (no
-// other part of the query), the visitor's first language, the user agent and
-// the IP address. Track looks up the country and city of the address and
-// counts the visitor with a salt that changes every day, and stores neither
-// the address nor the user agent: only totals per day.
+// only) or, for a link within the site, the previous page, the utm_source (or
+// ref), utm_medium and utm_campaign of the address (no other part of the
+// query), the visitor's first language, the user agent and the IP address
+// without its last part. Track looks up the country and city of that network
+// and counts the visitor with a salt that changes every day, and stores
+// neither the network nor the user agent: only totals per day.
+//
+// A visitor can object at DefaultOptOutPath, which the middleware answers, and
+// a browser that sends Global Privacy Control or Do Not Track is not counted.
 //
 // Without a token the tracker counts nothing, so a site runs the same in
 // development without Track.
@@ -113,6 +117,14 @@ type Config struct {
 	// Skip leaves requests it reports true for uncounted, such as those of
 	// the site's own editors.
 	Skip func(*http.Request) bool
+	// OptOutPath is the address of the page where a visitor can choose not
+	// to be counted, which the middleware answers; DefaultOptOutPath when
+	// empty.
+	OptOutPath string
+	// OptOutDomain is the domain of the cookie that remembers that choice,
+	// for a site on several subdomains, such as "example.com". Empty, the
+	// choice holds for the host it was made on.
+	OptOutDomain string
 	// Downloads are the file extensions, such as ".pdf", whose requests
 	// count as downloads; DefaultDownloads when nil. An empty list counts
 	// none.
@@ -290,6 +302,10 @@ func newTracker(config Config) (*Tracker, error) {
 		t.logger.Info("track: no token, page views are not counted")
 
 		return t, nil
+	}
+
+	if t.config.OptOutPath == "" {
+		t.config.OptOutPath = DefaultOptOutPath
 	}
 
 	if t.config.Endpoint == "" {

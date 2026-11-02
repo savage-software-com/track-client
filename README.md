@@ -62,6 +62,17 @@ app.Use(trackwt.Module(track.Config{Token: os.Getenv("TRACK_TOKEN")}))
 `trackwt` is a module of its own, so sites without go-webthings do not get
 its dependencies.
 
+## Visitors can object
+
+Track counts visitors without asking, so they should be able to say no. The
+middleware answers `/track-opt-out` (`Config.OptOutPath`), a small page in the
+visitor's language with a button: link to it from your footer or privacy
+statement. The choice is kept in one cookie, `track-opt-out`, which is only set
+when a visitor asks for it, and is the only cookie the tracker ever sets. A
+browser that sends Global Privacy Control (`Sec-GPC: 1`) or Do Not Track
+(`DNT: 1`) is not counted either. An objection works from then on: earlier
+visits are only in totals per day.
+
 ## What is counted
 
 - **Pages** a person opens: GET requests answered with 200 and `text/html`,
@@ -115,6 +126,7 @@ agent: only totals per day.
 | `TrustedProxies` | Proxies (addresses or CIDR ranges) whose `X-Forwarded-For`, `X-Real-IP` or `Forwarded` header names the visitor. Without them the visitor is `r.RemoteAddr`, which is right behind middleware such as go-router's or chi's `RealIP`. |
 | `ClientIP` | A function that returns the visitor's address, instead of the above. |
 | `Skip` | A function that leaves requests uncounted, such as your editors'. |
+| `OptOutPath`, `OptOutDomain` | The address of the page where a visitor can object, `/track-opt-out` by default, and the domain of its cookie for a site on several subdomains. |
 | `Downloads` | The file extensions that count as downloads; `DefaultDownloads` when nil, none when empty. |
 | `FlushInterval`, `BatchSize`, `QueueSize` | 10 seconds, 250 events and 10,000 events by default. |
 | `HTTPClient`, `Logger` | A client with a 10 second timeout and `slog.Default()` by default. |
