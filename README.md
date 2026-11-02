@@ -71,7 +71,8 @@ statement. The choice is kept in one cookie, `track-opt-out`, which is only set
 when a visitor asks for it, and is the only cookie the tracker ever sets. A
 browser that sends Global Privacy Control (`Sec-GPC: 1`) or Do Not Track
 (`DNT: 1`) is not counted either. An objection works from then on: earlier
-visits are only in totals per day.
+visits are only in totals per day. Only visitors can object: bots and scan
+attempts are counted without anything about a person, whatever they send.
 
 ## What is counted
 
@@ -94,6 +95,12 @@ visits are only in totals per day.
   Claude-User): by their user agent only, never as visitors. Feed readers
   such as Feedly and Inoreader are counted on feeds too (`/feed.xml`), with
   the number of subscribers their user agent reports.
+
+- **Scan attempts:** addresses scanners try on every website, such as
+  `/.env`, `/.git/config` or `/wp-login.php`, in any method and whoever asks.
+  Only the path and the status are sent, nothing about who asked, so they count
+  also when the request sends Global Privacy Control or Do Not Track. A page
+  your site really has at such an address still counts as a page.
 
 Your own events, such as a sign-up, count with `Event`:
 

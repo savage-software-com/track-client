@@ -36,10 +36,15 @@ type sample struct {
 }
 
 // sample copies what the event of r needs. A bot's request keeps its user
-// agent only: no address, referrer or language.
+// agent only: no address, referrer or language. A scan attempt keeps not even
+// that.
 func (t *Tracker) sample(r *http.Request, kind Kind) sample {
 	if kind == Bot {
 		return sample{kind: kind, at: time.Now().UTC(), host: t.host(r), path: r.URL.Path, agent: r.UserAgent()}
+	}
+
+	if kind == Probe {
+		return sample{kind: kind, at: time.Now().UTC(), host: t.host(r), path: r.URL.Path}
 	}
 
 	return sample{
@@ -116,7 +121,7 @@ func (t *Tracker) process(s sample) {
 	}()
 
 	// Bots are counted as bots, never as visitors.
-	if s.kind != Bot && isBot(s.agent) {
+	if s.kind != Bot && s.kind != Probe && isBot(s.agent) {
 		return
 	}
 
@@ -176,7 +181,7 @@ func (t *Tracker) eventOf(s sample) Event {
 		event.Duration = microseconds(s.duration)
 	}
 
-	if s.kind == ServerError || s.kind == Bot {
+	if s.kind == ServerError || s.kind == Probe || s.kind == Bot {
 		event.Status = s.status
 	}
 

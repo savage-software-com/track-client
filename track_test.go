@@ -261,6 +261,138 @@ func TestMiddlewareCountsNotFound(t *testing.T) {
 	}
 }
 
+func TestProbeKind(t *testing.T) {
+	tests := map[string]string{
+		"/.git/config":                    ProbeSource,
+		"/server/.git/HEAD":               ProbeSource,
+		"/.env":                           ProbeSecrets,
+		"/.env.production":                ProbeSecrets,
+		"/app/.ENV":                       ProbeSecrets,
+		"/.aws/credentials":               ProbeSecrets,
+		"/latest/meta-data/iam":           ProbeSecrets,
+		"/server.key":                     ProbeSecrets,
+		"/wp-login.php":                   ProbeWordPress,
+		"/wp-includes/js/":                ProbeWordPress,
+		"/cache-wordpress/":               ProbeWordPress,
+		"/xmlrpc.php":                     ProbeWordPress,
+		"/phpmyadmin/":                    ProbeTools,
+		"/_profiler/phpinfo":              ProbeTools,
+		"/webroot/index.php/_environment": ProbeTools,
+		"/shell.php":                      ProbeScripts,
+		"/backup/":                        ProbeBackup,
+		"/backup-backup/includes/":        ProbeBackup,
+		"/dump.sql":                       ProbeBackup,
+		"/":                               "",
+		"/pricing":                        "",
+		"/about/wp":                       "",
+		"/blog/environment":               "",
+		"/assets/app.js":                  "",
+		"/sitemap.xml":                    "",
+		"/.well-known/assetlinks.json":    "",
+	}
+
+	for address, want := range tests {
+		if got := ProbeKind(address); got != want {
+			t.Errorf("ProbeKind(%q) = %q, want %q", address, got, want)
+		}
+	}
+}
+
+func TestMiddlewareCountsScanAttemptsWithoutAnyoneInThem(t *testing.T) {
+	notFound := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
+	file := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, "SECRET=1")
+	})
+	pageWithTitle := page(200, "<title>Our WordPress tips</title>")
+	redirect := http.RedirectHandler("/elsewhere", http.StatusMovedPermanently)
+
+	tests := []struct {
+		name    string
+		handler http.Handler
+		method  string
+		path    string
+		headers []string
+		kind    Kind
+		status  int
+	}{
+		{"a browser", notFound, http.MethodGet, "/.git/config", nil, Probe, 404},
+		{"with a file extension", notFound, http.MethodGet, "/.env", nil, Probe, 404},
+		{"a post", notFound, http.MethodPost, "/xmlrpc.php", nil, Probe, 404},
+		{"a script", notFound, http.MethodGet, "/.env", []string{"User-Agent", "curl/8.0"}, Probe, 404},
+		{"sending Global Privacy Control", notFound, http.MethodGet, "/.env", []string{"Sec-GPC", "1"}, Probe, 404},
+		{"sending Do Not Track", notFound, http.MethodGet, "/wp-login.php", []string{"DNT", "1"}, Probe, 404},
+		{"with the opt-out cookie", notFound, http.MethodGet, "/.env", []string{"Cookie", OptOutCookie + "=1"}, Probe, 404},
+		{"a file that is really there", file, http.MethodGet, "/.env", nil, Probe, 200},
+		{"a page that is really there", pageWithTitle, http.MethodGet, "/wordpress-tips", nil, Pageview, 0},
+		{"that page, for someone who objected", pageWithTitle, http.MethodGet, "/wordpress-tips", []string{"Sec-GPC", "1"}, "", 0},
+		{"a redirect", redirect, http.MethodGet, "/wp-admin", nil, "", 0},
+		{"a bot that objects is still a bot", pageWithTitle, http.MethodGet, "/pricing", []string{"User-Agent", "curl/8.0", "Sec-GPC", "1"}, Bot, 200},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &collector{}
+			server := httptest.NewServer(fake)
+			defer server.Close()
+
+			tracker := startTracker(t, server.URL)
+
+			site := httptest.NewServer(tracker.Middleware(test.handler))
+			defer site.Close()
+
+			req, err := http.NewRequest(test.method, site.URL+test.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			req.Header.Set("User-Agent", browser)
+			req.Header.Set("Referer", "https://example.org/")
+
+			for i := 0; i+1 < len(test.headers); i += 2 {
+				req.Header.Set(test.headers[i], test.headers[i+1])
+			}
+
+			client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_ = resp.Body.Close()
+
+			if err := tracker.Flush(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+
+			events := fake.received()
+			if test.kind == "" {
+				if len(events) != 0 {
+					t.Fatalf("counted: %+v", events)
+				}
+
+				return
+			}
+
+			if len(events) != 1 || events[0].Kind != test.kind {
+				t.Fatalf("events = %+v, want one %s", events, test.kind)
+			}
+
+			if test.status != 0 && events[0].Status != test.status {
+				t.Errorf("status = %d, want %d", events[0].Status, test.status)
+			}
+
+			if test.kind == Probe {
+				event := events[0]
+				if event.IP != "" || event.UserAgent != "" || event.Referrer != "" || event.Language != "" || event.From != "" {
+					t.Errorf("a scan attempt says something about who asked: %+v", event)
+				}
+			}
+		})
+	}
+}
+
 func TestOptOut(t *testing.T) {
 	fake := &collector{}
 	server := httptest.NewServer(fake)

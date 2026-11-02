@@ -162,6 +162,11 @@ const (
 	ServerError Kind = "error"
 	// Download is a file of Config.Downloads a visitor fetched.
 	Download Kind = "download"
+	// Probe is a request for an address scanners try on every website, such
+	// as /.env (see ProbeKind). It holds the path and Event.Status only, so
+	// nothing about who asked, and comes first: such a request is not also a
+	// NotFound or a Bot.
+	Probe Kind = "probe"
 	// Bot is a request of a bot, crawler, link preview or script. It holds
 	// the user agent, never an address.
 	Bot Kind = "bot"
@@ -208,7 +213,7 @@ type Event struct {
 	// microseconds: from the request reaching the middleware until the
 	// handler returned. Zero when it was not measured.
 	Duration int64 `json:"duration_us,omitempty"`
-	// Status is the status of a ServerError or a Bot request.
+	// Status is the status of a ServerError, a Probe or a Bot request.
 	Status int `json:"status,omitempty"`
 }
 

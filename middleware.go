@@ -45,7 +45,13 @@ func (t *Tracker) Middleware(next http.Handler) http.Handler {
 		}
 
 		request := t.classify(r)
-		if request == ignored || optsOut(r) || t.skip(r) {
+		probe := len(r.URL.Path) <= maxPath && ProbeKind(r.URL.Path) != ""
+
+		// Only a visitor can object: a bot or a scanner that sends the same
+		// signal is no visitor, and nothing about it is sent anyway.
+		objected := optsOut(r)
+
+		if !probe && (request == ignored || objected && request != botRequest) || t.skip(r) {
 			next.ServeHTTP(w, r)
 
 			return
@@ -59,7 +65,7 @@ func (t *Tracker) Middleware(next http.Handler) http.Handler {
 		defer recorder.release()
 
 		next.ServeHTTP(recorder, r)
-		t.observe(recorder, r, request, time.Since(start))
+		t.observe(recorder, r, request, probe, objected, time.Since(start))
 	})
 }
 
@@ -81,10 +87,10 @@ func (t *Tracker) skip(r *http.Request) (skip bool) {
 	return t.config.Skip(r)
 }
 
-// observe hands what the recorder saw to the worker: a page, a 404, a
-// server error, a download or a bot's request. A panic is recovered: the
+// observe hands what the recorder saw to the worker: a scan attempt, a page, a
+// 404, a server error, a download or a bot's request. A panic is recovered: the
 // request is not counted, and the answer still reaches the visitor.
-func (t *Tracker) observe(recorder *recorder, r *http.Request, request requestKind, elapsed time.Duration) {
+func (t *Tracker) observe(recorder *recorder, r *http.Request, request requestKind, probe, objected bool, elapsed time.Duration) {
 	defer func() {
 		if v := recover(); v != nil {
 			t.logger.Error("track: page not counted", "panic", v)
@@ -99,6 +105,10 @@ func (t *Tracker) observe(recorder *recorder, r *http.Request, request requestKi
 	var kind Kind
 
 	switch {
+	case probe && probeAnswer(recorder, status):
+		kind = Probe
+	case request == ignored, objected && request != botRequest:
+		return
 	case request == botRequest:
 		kind = Bot
 	case status >= http.StatusInternalServerError:
@@ -130,6 +140,21 @@ func (t *Tracker) observe(recorder *recorder, r *http.Request, request requestKi
 	}
 
 	t.enqueue(s)
+}
+
+// probeAnswer reports whether the answer to a scanner's address counts as a scan
+// attempt: not a page of the site itself, a redirect or nothing at all. A file
+// that is answered with 200 is what the scanner was hoping for, and the site's
+// owner should know.
+func probeAnswer(recorder *recorder, status int) bool {
+	switch {
+	case status >= 300 && status < 400:
+		return false
+	case status < 300:
+		return recorder.wrote && !isHTML(recorder.contentType())
+	}
+
+	return true
 }
 
 // wholeFile reports whether a download was the whole file, or its first
