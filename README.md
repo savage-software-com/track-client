@@ -1,6 +1,6 @@
 # track-client
 
-The Go client of [Track](https://track.savage-software.nl): page view
+The Go client of [Track](https://track.savage-software.com): page view
 statistics for your website without cookies, without a script in the page
 and without storing IP addresses.
 
@@ -24,7 +24,7 @@ http.ListenAndServe(":8080", tracker.Middleware(handler))
 ```
 
 Get the token by registering your domain at
-<https://track.savage-software.nl>. Without a token the tracker counts
+<https://track.savage-software.com>. Without a token the tracker counts
 nothing, so development runs without Track. The package has no dependencies
 besides the standard library.
 
@@ -146,7 +146,7 @@ values leave the server, and the visit still counts.
 | Field | |
 | --- | --- |
 | `Token` | The site's token. |
-| `Endpoint` | Where events go; `https://track.savage-software.nl/api/v1/collect` by default. |
+| `Endpoint` | Where events go; `https://track.savage-software.com/api/v1/collect` by default. |
 | `Hostname` | The site's host name, behind a proxy that changes the Host header. Track counts only events of the registered domain and its subdomains. |
 | `SiteName` | Removed from page titles where the layout adds it: `About · My site` becomes `About`. |
 | `TrustedProxies` | Proxies (addresses or CIDR ranges) whose `X-Forwarded-For`, `X-Real-IP` or `Forwarded` header names the visitor. Without them the visitor is `r.RemoteAddr`, which is right behind middleware such as go-router's or chi's `RealIP`. |

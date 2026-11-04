@@ -1,5 +1,5 @@
 // Package track counts the page views of a website for Track
-// (https://track.savage-software.nl), without cookies and without anything
+// (https://track.savage-software.com), without cookies and without anything
 // in the visitor's browser. Wrap the site's handler with the middleware:
 //
 //	tracker, err := track.New(track.Config{Token: os.Getenv("TRACK_TOKEN")})
@@ -64,7 +64,7 @@ import (
 
 // DefaultEndpoint is where events are sent unless Config.Endpoint says
 // otherwise.
-const DefaultEndpoint = "https://track.savage-software.nl/api/v1/collect"
+const DefaultEndpoint = "https://track.savage-software.com/api/v1/collect"
 
 const (
 	defaultFlushInterval = 10 * time.Second
